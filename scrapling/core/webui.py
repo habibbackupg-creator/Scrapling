@@ -40,6 +40,72 @@ _PAGE_TEMPLATE = """<!doctype html>
       --bad: #991b1b;
       --chip: #ece6db;
     }
+    body.dark-mode {
+      --bg: #0f1419;
+      --card: #1a1f2e;
+      --ink: #e0e6ed;
+      --muted: #a0a8b8;
+      --accent: #10d981;
+      --accent-2: #059669;
+      --line: #2d3142;
+      --ok: #34d399;
+      --bad: #f87171;
+      --chip: #374151;
+    }
+    body.dark-mode pre, body.dark-mode .insight-card {
+      background: #1a1f2e;
+      color: #e0e6ed;
+    }
+    body.dark-mode table { background: #1a1f2e; }
+    body.dark-mode th { background: #2d3142; }
+    body.dark-mode input, body.dark-mode select, body.dark-mode textarea {
+      background: #1a1f2e;
+      color: #e0e6ed;
+      border-color: #2d3142;
+    }
+    .theme-toggle {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 1.2rem;
+      z-index: 999;
+    }
+    .result-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+      padding: 12px;
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(5, 150, 105, 0.1));
+      border-radius: 10px;
+    }
+    .summary-item {
+      text-align: center;
+      padding: 6px;
+    }
+    .summary-value {
+      display: block;
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .summary-label {
+      display: block;
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+    .email-hint { color: #f59e0b; font-size: 0.8rem; }
+    .duplicate-badge { background: #fee2e2; color: #991b1b; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+    .filter-panel { margin-bottom: 12px; padding: 10px; background: #f8f3e8; border-radius: 10px; }
+    .workflow-chip { padding: 8px; background: #fff; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 0.85rem; text-align: center; display: inline-block; margin: 4px; }
+    .workflow-chip:hover { background: #f0f0f0; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -342,6 +408,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   </style>
 </head>
 <body>
+  <button class=\"theme-toggle\" id=\"theme_toggle\" title=\"Toggle dark mode\">🌙</button>
   <main>
     <section class=\"card\">
       <h1>Scrapling Built-in Interface</h1>
@@ -438,6 +505,8 @@ _PAGE_TEMPLATE = """<!doctype html>
     const PRESETS = $presets_json;
     const STORAGE_KEY = 'scrapling.ui.savedForm';
     const CUSTOM_PRESETS_KEY = 'scrapling.ui.customPresets';
+    const THEME_KEY = 'scrapling.ui.theme';
+    const WORKFLOWS_KEY = 'scrapling.ui.workflows';
     const GOAL_PRESET_MAP = {
       contact: 'company_contact',
       lead: 'saas_lead_hunt',
@@ -450,6 +519,7 @@ _PAGE_TEMPLATE = """<!doctype html>
       competitor: 'Competitor goal captures headline, value props, pricing, and CTA blocks from landing pages.',
       marketing: 'Marketing goal prioritizes script and link signals to detect tracking and stack fingerprints.'
     };
+    const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
     function readField(id) {
       const element = document.getElementById(id);
@@ -756,6 +826,77 @@ _PAGE_TEMPLATE = """<!doctype html>
         .join('');
     }
 
+    function toggleTheme() {
+      const isDark = document.body.classList.toggle('dark-mode');
+      localStorage.setItem(THEME_KEY, isDark ? 'dark' : 'light');
+      updateThemeToggle();
+    }
+    function updateThemeToggle() {
+      const toggle = document.getElementById('theme_toggle');
+      if (toggle) {
+        toggle.textContent = document.body.classList.contains('dark-mode') ? '☀️' : '🌙';
+      }
+    }
+    function initTheme() {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved === 'dark' || (!saved && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.body.classList.add('dark-mode');
+      }
+      updateThemeToggle();
+    }
+    function validateEmail(email) {
+      return EMAIL_REGEX.test(email);
+    }
+    function getWorkflows() {
+      try {
+        const raw = localStorage.getItem(WORKFLOWS_KEY);
+        return raw ? JSON.parse(raw) : {};
+      } catch (error) {
+        return {};
+      }
+    }
+    function saveWorkflow(name, wizardUrl, goal) {
+      if (!name || !wizardUrl) return;
+      const workflows = getWorkflows();
+      workflows[name] = { url: wizardUrl, goal: goal || 'contact', created: new Date().toISOString() };
+      try {
+        localStorage.setItem(WORKFLOWS_KEY, JSON.stringify(workflows));
+      } catch (error) {
+        // Ignore
+      }
+    }
+    function loadWorkflow(name) {
+      const workflows = getWorkflows();
+      const wf = workflows[name];
+      if (wf) {
+        writeField('wizard_url', wf.url);
+        writeField('wizard_goal', wf.goal);
+        updateWizardSummary();
+      }
+    }
+    function deleteWorkflow(name) {
+      const workflows = getWorkflows();
+      delete workflows[name];
+      try {
+        localStorage.setItem(WORKFLOWS_KEY, JSON.stringify(workflows));
+      } catch (error) {
+        // Ignore
+      }
+      renderWorkflows();
+    }
+    function renderWorkflows() {
+      const container = document.getElementById('workflows_list');
+      if (!container) return;
+      const workflows = getWorkflows();
+      if (Object.keys(workflows).length === 0) {
+        container.innerHTML = '<div style=\"color: var(--muted); font-size: 0.85rem;\">No saved workflows yet.</div>';
+        return;
+      }
+      container.innerHTML = Object.keys(workflows).map(name => 
+        `<div class="workflow-chip" title="${workflows[name].url}" onclick="loadWorkflow('${escapeHtml(name)}')">📌 ${escapeHtml(name)}</div>`
+      ).join('');
+    }
+
     function updateWizardSummary() {
       const goal = readField('wizard_goal') || 'contact';
       const summary = document.getElementById('wizard_summary');
@@ -805,8 +946,10 @@ _PAGE_TEMPLATE = """<!doctype html>
     window.importCustomPresets = importCustomPresets;
 
     document.addEventListener('DOMContentLoaded', () => {
+      initTheme();
       restoreState();
       renderPresetCards();
+      renderWorkflows();
 
       const presetSearch = document.getElementById('preset_search');
       const presetScope = document.getElementById('preset_scope');
@@ -817,6 +960,7 @@ _PAGE_TEMPLATE = """<!doctype html>
       const wizardUrl = document.getElementById('wizard_url');
       const wizardGoal = document.getElementById('wizard_goal');
       const wizardApplyRunBtn = document.getElementById('wizard_apply_run');
+      const themeToggle = document.getElementById('theme_toggle');
 
       if (wizardUrl) {
         wizardUrl.value = readField('url') || '';
@@ -849,6 +993,10 @@ _PAGE_TEMPLATE = """<!doctype html>
       }
       if (wizardApplyRunBtn) {
         wizardApplyRunBtn.addEventListener('click', runGuidedFlow);
+      }
+
+      if (themeToggle) {
+        themeToggle.addEventListener('click', toggleTheme);
       }
 
       document.querySelectorAll('input, textarea, select').forEach((element) => {
