@@ -1290,6 +1290,7 @@ _HISTORY: deque[_HistoryEntry] = deque(maxlen=25)
 _DOWNLOADS: dict[str, tuple[bytes, str, str]] = {}
 _DOWNLOAD_ORDER: deque[str] = deque(maxlen=25)
 _SCHEDULED_RUNS: deque[dict[str, str]] = deque(maxlen=50)
+_MARKETING_INSIGHTS: deque[dict[str, object]] = deque(maxlen=200)
 _STATE_LOCK = Lock()
 
 _EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -1776,6 +1777,74 @@ def _normalize_bulk_urls(raw_urls: str) -> list[str]:
                 continue
             urls.append(candidate)
     return _unique_preserve_order(urls)
+
+
+def _parse_cron_field(field: str, min_value: int, max_value: int) -> set[int]:
+    values: set[int] = set()
+    for token in field.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token == "*":
+            values.update(range(min_value, max_value + 1))
+            continue
+        if "/" in token:
+            left, step_raw = token.split("/", 1)
+            step = max(1, int(step_raw))
+            if left == "*":
+                values.update(v for v in range(min_value, max_value + 1) if (v - min_value) % step == 0)
+                continue
+            token = left
+            if "-" in token:
+                start_raw, end_raw = token.split("-", 1)
+                start = int(start_raw)
+                end = int(end_raw)
+                values.update(v for v in range(start, end + 1) if (v - start) % step == 0)
+                continue
+        if "-" in token:
+            start_raw, end_raw = token.split("-", 1)
+            start = int(start_raw)
+            end = int(end_raw)
+            values.update(range(start, end + 1))
+            continue
+        values.add(int(token))
+
+    return {v for v in values if min_value <= v <= max_value}
+
+
+def _is_valid_cron(expr: str) -> bool:
+    parts = expr.split()
+    if len(parts) != 5:
+        return False
+
+    try:
+        _parse_cron_field(parts[0], 0, 59)
+        _parse_cron_field(parts[1], 0, 23)
+        _parse_cron_field(parts[2], 1, 31)
+        _parse_cron_field(parts[3], 1, 12)
+        _parse_cron_field(parts[4], 0, 6)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _upsert_schedule(schedule: dict[str, str]) -> dict[str, str]:
+    with _STATE_LOCK:
+        for index, existing in enumerate(_SCHEDULED_RUNS):
+            if existing.get("id") == schedule.get("id"):
+                _SCHEDULED_RUNS[index] = schedule
+                return schedule
+        _SCHEDULED_RUNS.appendleft(schedule)
+    return schedule
+
+
+def _delete_schedule(schedule_id: str) -> bool:
+    with _STATE_LOCK:
+        for index, existing in enumerate(_SCHEDULED_RUNS):
+            if existing.get("id") == schedule_id:
+                del _SCHEDULED_RUNS[index]
+                return True
+    return False
 
 
 def _build_batch_payload(result: _BatchResult) -> str:
@@ -2489,134 +2558,224 @@ def _make_handler():
             self.wfile.write(data)
 
         def do_GET(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
-            if path == "/":
-                self._send_html(_render_page())
-                return
+          path = urlsplit(self.path).path
+          if path == "/":
+            self._send_html(_render_page())
+            return
 
-            if path == "/api/health":
-                self._send_json({"ok": True, "service": "ScraplingUI", "version": self.server_version})
-                return
+          if path == "/api/health":
+            self._send_json({"ok": True, "service": "ScraplingUI", "version": self.server_version})
+            return
 
-            if path == "/api/history":
-                with _STATE_LOCK:
-                    entries = list(_HISTORY)
-                self._send_json(
-                    {
-                        "ok": True,
-                        "items": [
-                            {
-                                "created_at": entry.created_at,
-                                "url": entry.url,
-                                "status": entry.status,
-                                "lead_score": entry.lead_score,
-                                "ok": entry.ok,
-                            }
-                            for entry in entries
-                        ],
-                    }
-                )
-                return
+          if path == "/api/history":
+            with _STATE_LOCK:
+              entries = list(_HISTORY)
+            self._send_json(
+              {
+                "ok": True,
+                "items": [
+                  {
+                    "created_at": entry.created_at,
+                    "url": entry.url,
+                    "status": entry.status,
+                    "lead_score": entry.lead_score,
+                    "ok": entry.ok,
+                  }
+                  for entry in entries
+                ],
+              }
+            )
+            return
 
-            if path == "/api/schedules":
-                with _STATE_LOCK:
-                    schedules = list(_SCHEDULED_RUNS)
-                self._send_json({"ok": True, "items": schedules})
-                return
+          if path == "/api/schedules":
+            with _STATE_LOCK:
+              schedules = list(_SCHEDULED_RUNS)
+            self._send_json({"ok": True, "items": schedules})
+            return
 
-            if path.startswith("/download/"):
-                download_id = path.replace("/download/", "", 1).strip()
-                self._send_download(download_id)
-                return
+          if path == "/api/marketing-insights":
+            with _STATE_LOCK:
+              insights = list(_MARKETING_INSIGHTS)
+            self._send_json({"ok": True, "items": insights})
+            return
 
-            self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
+          if path.startswith("/download/"):
+            download_id = path.replace("/download/", "", 1).strip()
+            self._send_download(download_id)
+            return
+
+          self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
 
         def do_POST(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
-            if path not in {"/extract", "/batch", "/schedule", "/api/extract", "/api/schedules"}:
-                self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
-                return
+          path = urlsplit(self.path).path
+          if path not in {"/extract", "/batch", "/schedule", "/api/extract", "/api/schedules", "/api/marketing-insights"}:
+            self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
+            return
 
-            content_length = int(self.headers.get("Content-Length", "0"))
-            if content_length > 128_000:
-                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE.value, "Request body too large")
-                return
+          content_length = int(self.headers.get("Content-Length", "0"))
+          if content_length > 128_000:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE.value, "Request body too large")
+            return
 
-            form_data = self.rfile.read(content_length)
+          form_data = self.rfile.read(content_length)
 
-            if path == "/api/extract":
-                try:
-                    payload = json.loads(form_data.decode("utf-8") or "{}")
-                except json.JSONDecodeError:
-                    self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
-                    return
+          if path == "/api/extract":
+            try:
+              payload = json.loads(form_data.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+              self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+              return
 
-                encoded = urlencode(
-                    {
-                        "url": payload.get("url", ""),
-                        "css_selector": payload.get("css_selector", ""),
-                        "fmt": payload.get("fmt", "txt"),
-                    }
-                ).encode("utf-8", errors="replace")
-                result, _ = _extract_from_form(encoded)
-                self._send_json(
-                    {
-                        "ok": result.ok,
-                        "status": result.status,
-                        "lead_score": result.lead_score,
-                        "emails": result.emails,
-                        "phones": result.phones,
-                        "links": result.links[:20],
-                        "tracker_hits": result.tracker_hits,
-                        "comparison_summary": result.comparison_summary,
-                        "download_id": result.download_id,
-                    },
-                    status=HTTPStatus.OK if result.ok else HTTPStatus.BAD_REQUEST,
-                )
-                return
+            encoded = urlencode(
+              {
+                "url": payload.get("url", ""),
+                "css_selector": payload.get("css_selector", ""),
+                "fmt": payload.get("fmt", "txt"),
+              }
+            ).encode("utf-8", errors="replace")
+            result, _ = _extract_from_form(encoded)
+            self._send_json(
+              {
+                "ok": result.ok,
+                "status": result.status,
+                "lead_score": result.lead_score,
+                "emails": result.emails,
+                "phones": result.phones,
+                "links": result.links[:20],
+                "tracker_hits": result.tracker_hits,
+                "comparison_summary": result.comparison_summary,
+                "download_id": result.download_id,
+              },
+              status=HTTPStatus.OK if result.ok else HTTPStatus.BAD_REQUEST,
+            )
+            return
 
-            if path == "/api/schedules":
-                try:
-                    payload = json.loads(form_data.decode("utf-8") or "{}")
-                except json.JSONDecodeError:
-                    self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
-                    return
+          if path == "/api/schedules":
+            try:
+              payload = json.loads(form_data.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+              self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+              return
 
-                schedule = {
-                    "id": uuid.uuid4().hex,
-                    "url": str(payload.get("url", "")).strip(),
-                    "goal": str(payload.get("goal", "contact")).strip() or "contact",
-                    "cron": str(payload.get("cron", "")).strip(),
-                    "created_at": datetime.now(tz=timezone.utc).isoformat(),
-                }
-                with _STATE_LOCK:
-                    _SCHEDULED_RUNS.appendleft(schedule)
-                self._send_json({"ok": True, "item": schedule}, status=HTTPStatus.CREATED)
-                return
+            cron_expr = str(payload.get("cron", "")).strip()
+            if not _is_valid_cron(cron_expr):
+              self._send_json(
+                {"ok": False, "error": "Invalid cron expression. Use standard 5-field cron."},
+                status=HTTPStatus.BAD_REQUEST,
+              )
+              return
 
-            if path == "/extract":
-                result, state = _extract_from_form(form_data)
-                self._send_html(_render_page(state=state, result=result))
-                return
+            schedule = {
+              "id": uuid.uuid4().hex,
+              "url": str(payload.get("url", "")).strip(),
+              "goal": str(payload.get("goal", "contact")).strip() or "contact",
+              "cron": cron_expr,
+              "created_at": datetime.now(tz=timezone.utc).isoformat(),
+              "enabled": str(payload.get("enabled", "true")).lower() != "false",
+            }
+            _upsert_schedule(schedule)
+            self._send_json({"ok": True, "item": schedule}, status=HTTPStatus.CREATED)
+            return
 
-            if path == "/schedule":
-                parsed = parse_qs(form_data.decode("utf-8"), keep_blank_values=True)
-                schedule = {
-                    "id": uuid.uuid4().hex,
-                    "url": parsed.get("schedule_url", [""])[0].strip(),
-                    "goal": parsed.get("schedule_goal", ["contact"])[0].strip() or "contact",
-                    "cron": parsed.get("schedule_cron", [""])[0].strip(),
-                    "created_at": datetime.now(tz=timezone.utc).isoformat(),
-                }
-                if schedule["url"]:
-                    with _STATE_LOCK:
-                        _SCHEDULED_RUNS.appendleft(schedule)
-                self._send_html(_render_page())
-                return
+          if path == "/api/marketing-insights":
+            try:
+              payload = json.loads(form_data.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+              self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+              return
 
-            batch_result, urls = _extract_batch_from_form(form_data)
-            batch_state = _UIFormState(url=urls[0] if urls else "")
-            self._send_html(_render_page(state=batch_state, batch_result=batch_result))
+            with _STATE_LOCK:
+              _MARKETING_INSIGHTS.appendleft(payload)
+            self._send_json({"ok": True}, status=HTTPStatus.CREATED)
+            return
+
+          if path == "/extract":
+            result, state = _extract_from_form(form_data)
+            self._send_html(_render_page(state=state, result=result))
+            return
+
+          if path == "/schedule":
+            parsed = parse_qs(form_data.decode("utf-8"), keep_blank_values=True)
+            cron_expr = parsed.get("schedule_cron", [""])[0].strip()
+            if not _is_valid_cron(cron_expr):
+              self._send_html(_render_page(state=_UIFormState(url=parsed.get("schedule_url", [""])[0].strip())))
+              return
+
+            schedule = {
+              "id": uuid.uuid4().hex,
+              "url": parsed.get("schedule_url", [""])[0].strip(),
+              "goal": parsed.get("schedule_goal", ["contact"])[0].strip() or "contact",
+              "cron": cron_expr,
+              "created_at": datetime.now(tz=timezone.utc).isoformat(),
+              "enabled": True,
+            }
+            if schedule["url"]:
+              _upsert_schedule(schedule)
+            self._send_html(_render_page())
+            return
+
+          batch_result, urls = _extract_batch_from_form(form_data)
+          batch_state = _UIFormState(url=urls[0] if urls else "")
+          self._send_html(_render_page(state=batch_state, batch_result=batch_result))
+
+        def do_PATCH(self) -> None:  # noqa: N802
+          path = urlsplit(self.path).path
+          if not path.startswith("/api/schedules/"):
+            self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
+            return
+
+          schedule_id = path.replace("/api/schedules/", "", 1).strip()
+          content_length = int(self.headers.get("Content-Length", "0"))
+          body = self.rfile.read(content_length)
+          try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+          except json.JSONDecodeError:
+            self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+            updated: Optional[dict] = None
+          with _STATE_LOCK:
+            for index, existing in enumerate(_SCHEDULED_RUNS):
+              if existing.get("id") != schedule_id:
+                continue
+              merged = dict(existing)
+              if "cron" in payload:
+                cron_expr = str(payload.get("cron", "")).strip()
+                if not _is_valid_cron(cron_expr):
+                  self._send_json(
+                    {"ok": False, "error": "Invalid cron expression. Use standard 5-field cron."},
+                    status=HTTPStatus.BAD_REQUEST,
+                  )
+                  return
+                merged["cron"] = cron_expr
+              if "enabled" in payload:
+                merged["enabled"] = bool(payload.get("enabled"))
+              if "goal" in payload:
+                merged["goal"] = str(payload.get("goal") or "contact")
+              if "url" in payload:
+                merged["url"] = str(payload.get("url") or "")
+              _SCHEDULED_RUNS[index] = merged
+              updated = merged
+              break
+
+          if not updated:
+            self._send_json({"ok": False, "error": "Schedule not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+          self._send_json({"ok": True, "item": updated})
+
+        def do_DELETE(self) -> None:  # noqa: N802
+          path = urlsplit(self.path).path
+          if not path.startswith("/api/schedules/"):
+            self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
+            return
+
+          schedule_id = path.replace("/api/schedules/", "", 1).strip()
+          deleted = _delete_schedule(schedule_id)
+          if not deleted:
+            self._send_json({"ok": False, "error": "Schedule not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+          self._send_json({"ok": True})
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             log.debug("UI server: " + format % args)

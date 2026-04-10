@@ -201,6 +201,20 @@ def ui(host, port, open_browser):
     run_web_ui(host=host, port=port, open_browser=open_browser)
 
 
+@command(help="Run Scrapling's cron-like scheduler worker as a separate process.")
+@option(
+    "--ui-base-url",
+    type=str,
+    default="",
+    help="Base URL for Scrapling Web UI APIs (default: auto from PORT/env)",
+)
+@option("--poll-seconds", type=int, default=20, help="Worker polling interval in seconds (default: 20)")
+def scheduler_worker(ui_base_url, poll_seconds):
+    from scrapling.core.scheduler_worker import run_scheduler_worker
+
+    run_scheduler_worker(ui_base_url=ui_base_url or None, poll_seconds=max(5, int(poll_seconds)))
+
+
 @group(
     help="Fetch web pages using various fetchers and extract full/selected HTML content as HTML, Markdown, or extract text content."
 )
@@ -650,3 +664,4 @@ main.add_command(shell)
 main.add_command(extract)
 main.add_command(mcp)
 main.add_command(ui)
+main.add_command(scheduler_worker)

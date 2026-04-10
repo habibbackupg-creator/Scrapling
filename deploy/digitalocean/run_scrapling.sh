@@ -51,11 +51,38 @@ case "$MODE" in
       # Install only what web UI needs when running outside App Platform build step.
       python -m pip install -e ".[fetchers]"
     fi
-    # In container builds that use uv, run from uv-managed env so compiled deps (e.g. lxml) are available.
-    if command -v uv >/dev/null 2>&1; then
-      exec uv run python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
-    fi
-    exec python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
+    start_ui() {
+      if command -v uv >/dev/null 2>&1; then
+        uv run python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
+      else
+        python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
+      fi
+    }
+
+    start_worker() {
+      if command -v uv >/dev/null 2>&1; then
+        uv run scrapling scheduler-worker --ui-base-url "http://127.0.0.1:${PORT:-8000}" --poll-seconds "${SCRAPLING_WORKER_POLL_SECONDS:-20}"
+      else
+        scrapling scheduler-worker --ui-base-url "http://127.0.0.1:${PORT:-8000}" --poll-seconds "${SCRAPLING_WORKER_POLL_SECONDS:-20}"
+      fi
+    }
+
+    start_ui &
+    UI_PID=$!
+    start_worker &
+    WORKER_PID=$!
+
+    shutdown() {
+      kill "$UI_PID" "$WORKER_PID" 2>/dev/null || true
+      wait "$UI_PID" "$WORKER_PID" 2>/dev/null || true
+    }
+
+    trap shutdown SIGTERM SIGINT
+
+    wait -n "$UI_PID" "$WORKER_PID"
+    EXIT_CODE=$?
+    shutdown
+    exit "$EXIT_CODE"
     ;;
   *)
     echo "Unknown mode: $MODE" >&2
