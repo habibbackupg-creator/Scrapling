@@ -42,7 +42,8 @@ case "$MODE" in
     ;;
   ui)
     python -m pip install --upgrade pip
-    python -m pip install -e ".[all]"
+    # Install only core scrapling - UI doesn't need Playwright, IPython, MCP, etc.
+    python -m pip install -e ".[fetchers]"
     exec python -m scrapling.cli ui --host 0.0.0.0 --port "${PORT:-8000}" --no-open-browser
     ;;
   *)
