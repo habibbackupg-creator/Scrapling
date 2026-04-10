@@ -1527,7 +1527,7 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
         insights_download_link = f'/download/{result.insights_download_id}' if result.insights_download_id else "#"
         lead_score_label = _lead_score_label(result.lead_score)
         comparison_block = f'<div class="meta">{html.escape(result.comparison_summary)}</div>' if result.comparison_summary else ""
-      full_output = html.escape(result.output)
+        full_output = html.escape(result.output)
 
         email_items = "".join(
             f'<li><a href="mailto:{html.escape(email)}">{html.escape(email)}</a></li>'
