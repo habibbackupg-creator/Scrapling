@@ -351,8 +351,10 @@ _PAGE_TEMPLATE = """<!doctype html>
       </form>
     </section>
 
+    $dashboard_block
     $preset_block
     $result_block
+    $batch_result_block
     $history_block
   </main>
 
@@ -687,6 +689,32 @@ class _ExtractResult:
 
 
 @dataclass
+class _BatchRow:
+    url: str
+    status: Optional[int] = None
+    ok: bool = False
+    emails: list[str] = field(default_factory=list)
+    phones: list[str] = field(default_factory=list)
+    links: list[str] = field(default_factory=list)
+    cta_links: list[str] = field(default_factory=list)
+    tracker_hits: list[str] = field(default_factory=list)
+    social_links: dict[str, list[str]] = field(default_factory=dict)
+    error: str = ""
+
+
+@dataclass
+class _BatchResult:
+    ok: bool
+    total_urls: int = 0
+    success_count: int = 0
+    failed_count: int = 0
+    rows: list[_BatchRow] = field(default_factory=list)
+    message: str = ""
+    download_id: str = ""
+    csv_download_id: str = ""
+
+
+@dataclass
 class _HistoryEntry:
     created_at: str
     url: str
@@ -721,13 +749,13 @@ _CTA_HINTS = (
 )
 
 _TRACKER_SIGNATURES: dict[str, tuple[str, ...]] = {
-  "Google Analytics": ("googletagmanager.com/gtag", "google-analytics.com", "gtag('config'", "ga("),
-  "Google Tag Manager": ("googletagmanager.com/gtm", "gtm.js", "dataLayer.push"),
-  "Meta Pixel": ("connect.facebook.net/en_US/fbevents.js", "fbq('init'", "fbq(\"init\""),
-  "LinkedIn Insight": ("snap.licdn.com/li.lms-analytics/insight.min.js", "_linkedin_partner_id"),
-  "TikTok Pixel": ("analytics.tiktok.com/i18n/pixel", "ttq.track", "tiktok pixel"),
-  "HubSpot": ("js.hs-scripts.com", "hubspot"),
-  "Segment": ("cdn.segment.com/analytics.js", "analytics.track("),
+    "Google Analytics": ("googletagmanager.com/gtag", "google-analytics.com", "gtag('config'", "ga("),
+    "Google Tag Manager": ("googletagmanager.com/gtm", "gtm.js", "dataLayer.push"),
+    "Meta Pixel": ("connect.facebook.net/en_US/fbevents.js", "fbq('init'", "fbq(\"init\""),
+    "LinkedIn Insight": ("snap.licdn.com/li.lms-analytics/insight.min.js", "_linkedin_partner_id"),
+    "TikTok Pixel": ("analytics.tiktok.com/i18n/pixel", "ttq.track", "tiktok pixel"),
+    "HubSpot": ("js.hs-scripts.com", "hubspot"),
+    "Segment": ("cdn.segment.com/analytics.js", "analytics.track("),
 }
 
 _SOCIAL_DOMAINS: dict[str, tuple[str, ...]] = {
@@ -854,7 +882,7 @@ _PRESETS = {
         "cookies_text": "",
         "proxy": "",
     },
-      "marketing_automation": {
+    "marketing_automation": {
         "title": "Marketing Automation Audit",
         "description": "Capture conversion links, social channels, contacts, and tracking signals.",
         "category": "marketing",
@@ -872,7 +900,7 @@ _PRESETS = {
         "params_text": "",
         "cookies_text": "",
         "proxy": "",
-      },
+    },
 }
 
 
@@ -1025,6 +1053,160 @@ def _build_marketing_payload(result: _ExtractResult, state: _UIFormState) -> str
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _normalize_bulk_urls(raw_urls: str) -> list[str]:
+    urls: list[str] = []
+    for raw_line in raw_urls.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for candidate in re.split(r"[\s,]+", line):
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            parsed = urlsplit(candidate)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            urls.append(candidate)
+    return _unique_preserve_order(urls)
+
+
+def _build_batch_payload(result: _BatchResult) -> str:
+    payload = {
+        "ok": result.ok,
+        "total_urls": result.total_urls,
+        "success_count": result.success_count,
+        "failed_count": result.failed_count,
+        "rows": [
+        {
+            "url": row.url,
+            "ok": row.ok,
+            "status": row.status,
+            "emails": row.emails,
+            "phones": row.phones,
+            "links": row.links,
+            "cta_links": row.cta_links,
+            "tracker_hits": row.tracker_hits,
+            "social_links": row.social_links,
+            "error": row.error,
+        }
+        for row in result.rows
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_batch_csv(result: _BatchResult) -> str:
+    header = "url,ok,status,emails,phones,links,cta_links,tracker_hits,error"
+    lines = [header]
+    for row in result.rows:
+      lines.append(
+            ",".join(
+                [
+                    json.dumps(row.url)[1:-1],
+                    "true" if row.ok else "false",
+                    str(row.status if row.status is not None else ""),
+                    str(len(row.emails)),
+                    str(len(row.phones)),
+                    str(len(row.links)),
+                    str(len(row.cta_links)),
+                    str(len(row.tracker_hits)),
+                    json.dumps(row.error)[1:-1],
+                ]
+            )
+      )
+    return "\n".join(lines)
+
+
+def _extract_batch_from_form(form_data: bytes) -> tuple[_BatchResult, list[str]]:
+    parsed = parse_qs(form_data.decode("utf-8"), keep_blank_values=True)
+    urls = _normalize_bulk_urls(parsed.get("bulk_urls", [""])[0])
+    if not urls:
+        result = _BatchResult(ok=False, message="At least one valid http/https URL is required.")
+        return result, []
+
+    timeout = 30
+    timeout_raw = parsed.get("bulk_timeout", ["30"])[0].strip()
+    if timeout_raw:
+        try:
+            timeout = max(1, min(300, int(timeout_raw)))
+        except ValueError:
+            timeout = 30
+
+    state = _UIFormState(
+        css_selector=parsed.get("bulk_css_selector", [""])[0].strip(),
+        fmt=parsed.get("bulk_fmt", ["txt"])[0].strip().lower(),
+        headers_text=parsed.get("bulk_headers", [""])[0],
+        params_text=parsed.get("bulk_params", [""])[0],
+        cookies_text=parsed.get("bulk_cookies", [""])[0],
+        proxy=parsed.get("bulk_proxy", [""])[0].strip(),
+        timeout=timeout,
+        impersonate=parsed.get("bulk_impersonate", ["chrome"])[0].strip() or "chrome",
+        follow_redirects=_bool_field(parsed, "bulk_follow_redirects", default=False),
+        verify=_bool_field(parsed, "bulk_verify", default=False),
+        stealthy_headers=_bool_field(parsed, "bulk_stealthy_headers", default=False),
+        ai_targeted=_bool_field(parsed, "bulk_ai_targeted", default=False),
+    )
+
+    if state.fmt not in {"md", "html", "txt"}:
+        state.fmt = "txt"
+
+    rows: list[_BatchRow] = []
+    success_count = 0
+    failed_count = 0
+
+    try:
+        headers = _parse_headers_text(state.headers_text)
+        cookies = _parse_cookies_text(state.cookies_text)
+        params = _parse_params_text(state.params_text)
+
+        for url in urls[:20]:
+            row = _BatchRow(url=url)
+            try:
+                response = Fetcher.get(
+                    url,
+                    headers=headers or None,
+                    cookies=cookies or None,
+                    params=params or None,
+                    timeout=state.timeout,
+                    proxy=state.proxy or None,
+                    follow_redirects=state.follow_redirects,
+                    verify=state.verify,
+                    impersonate=state.impersonate,
+                    stealthy_headers=state.stealthy_headers,
+                )
+                output = _convert_response(response, state.css_selector, state.fmt, state.ai_targeted)
+                emails, phones, links, social_links = _extract_contact_insights(output)
+                cta_links, tracker_hits = _extract_marketing_insights(output, links)
+                row.status = response.status
+                row.ok = True
+                row.emails = emails
+                row.phones = phones
+                row.links = links
+                row.social_links = social_links
+                row.cta_links = cta_links
+                row.tracker_hits = tracker_hits
+                success_count += 1
+            except Exception as exc:  # pragma: no cover
+                row.ok = False
+                row.error = str(exc)
+                failed_count += 1
+            rows.append(row)
+
+        batch_result = _BatchResult(
+            ok=True,
+            total_urls=len(urls[:20]),
+            success_count=success_count,
+            failed_count=failed_count,
+            rows=rows,
+        )
+        batch_result.download_id = _cache_download(_build_batch_payload(batch_result), "json")
+        batch_result.csv_download_id = _cache_download(_build_batch_csv(batch_result), "csv")
+        return batch_result, urls
+    except Exception as exc:  # pragma: no cover
+        log.exception("Bulk marketing audit failed")
+        return _BatchResult(ok=False, message=str(exc)), urls
+
+
 def _convert_response(response, css_selector: str, fmt: str, ai_targeted: bool) -> str:
     extraction_type = Convertor._extension_map.get(fmt, "markdown")
     return "".join(
@@ -1043,6 +1225,7 @@ def _cache_download(output: str, fmt: str) -> str:
         "html": "text/html; charset=utf-8",
         "txt": "text/plain; charset=utf-8",
     "json": "application/json; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
     }.get(fmt, "text/plain; charset=utf-8")
     filename = f"scrapling-output.{fmt}"
     download_id = uuid.uuid4().hex
@@ -1220,6 +1403,92 @@ def _render_preset_block() -> str:
     )
 
 
+def _render_dashboard_block(state: Optional[_UIFormState] = None) -> str:
+  state = state or _UIFormState()
+  bulk_urls = html.escape(state.url)
+  return (
+    '<section class="card">'
+    '<div class="section-title" style="margin-top:0">Marketing Dashboard</div>'
+    '<p>Paste multiple URLs, reuse the same request settings, and inspect contact, CTA, and tracker signals in one pass.</p>'
+    '<form method="post" action="/batch">'
+    '<label for="bulk_urls">Bulk URLs (one per line)</label>'
+    f'<textarea id="bulk_urls" name="bulk_urls" placeholder="https://example.com\nhttps://example.org">{bulk_urls}</textarea>'
+    '<div class="grid-2">'
+    '<div>'
+    '<label for="bulk_css_selector">Bulk CSS Selector (optional)</label>'
+    f'<input id="bulk_css_selector" name="bulk_css_selector" type="text" value="{html.escape(state.css_selector)}" placeholder="a[href], form, script" />'
+    '</div>'
+    '<div>'
+    '<label for="bulk_fmt">Bulk Output Format</label>'
+    f'<select id="bulk_fmt" name="bulk_fmt">{_render_format_options(state.fmt)}</select>'
+    '</div>'
+    '</div>'
+    '<div class="grid-3">'
+    '<div>'
+    '<label for="bulk_impersonate">Impersonate</label>'
+    f'<input id="bulk_impersonate" name="bulk_impersonate" type="text" value="{html.escape(state.impersonate)}" />'
+    '</div>'
+    '<div>'
+    '<label for="bulk_timeout">Timeout (seconds)</label>'
+    f'<input id="bulk_timeout" name="bulk_timeout" type="number" min="1" max="300" value="{state.timeout}" />'
+    '</div>'
+    '<div>'
+    '<label for="bulk_proxy">Proxy (optional)</label>'
+    f'<input id="bulk_proxy" name="bulk_proxy" type="text" value="{html.escape(state.proxy)}" placeholder="http://user:pass@host:port" />'
+    '</div>'
+    '</div>'
+    '<div class="actions">'
+    '<button class="btn" type="submit">Run Dashboard Audit</button>'
+    '<a class="btn secondary" href="/">Reset</a>'
+    '</div>'
+    '</form>'
+    '</section>'
+  )
+
+
+def _render_batch_result_block(result: Optional[_BatchResult]) -> str:
+  if result is None:
+    return ""
+
+  if not result.ok:
+    return (
+      '<section class="card">'
+      '<div class="status-bad">Bulk audit failed</div>'
+      f'<pre>{html.escape(result.message)}</pre>'
+      '</section>'
+    )
+
+  rows = []
+  for row in result.rows:
+    rows.append(
+      '<tr>'
+      f'<td class="mono">{html.escape(row.url)}</td>'
+      f'<td>{"OK" if row.ok else "FAILED"}</td>'
+      f'<td>{row.status if row.status is not None else "-"}</td>'
+      f'<td>{len(row.emails)}</td>'
+      f'<td>{len(row.phones)}</td>'
+      f'<td>{len(row.cta_links)}</td>'
+      f'<td>{len(row.tracker_hits)}</td>'
+      f'<td class="mono">{html.escape(row.error[:160]) if row.error else "-"}</td>'
+      '</tr>'
+    )
+
+  return (
+    '<section class="card">'
+    '<div class="status-ok">Bulk audit completed</div>'
+    f'<div class="meta">Processed: {result.total_urls} | Success: {result.success_count} | Failed: {result.failed_count}</div>'
+    '<div class="actions" style="margin-top:10px">'
+    f'<a class="btn secondary" href="{f"/download/{result.download_id}" if result.download_id else "#"}">Download JSON</a>'
+    f'<a class="btn ghost" href="{f"/download/{result.csv_download_id}" if result.csv_download_id else "#"}">Download CSV</a>'
+    '</div>'
+    '<table style="margin-top:12px">'
+    '<thead><tr><th>URL</th><th>Status</th><th>HTTP</th><th>Emails</th><th>Phones</th><th>CTA</th><th>Trackers</th><th>Notes</th></tr></thead>'
+    f"<tbody>{''.join(rows)}</tbody>"
+    '</table>'
+    '</section>'
+  )
+
+
 def _render_history_block() -> str:
     with _STATE_LOCK:
         entries = list(_HISTORY)
@@ -1260,12 +1529,15 @@ def _render_page(
     *,
     state: Optional[_UIFormState] = None,
     result: Optional[_ExtractResult] = None,
+  batch_result: Optional[_BatchResult] = None,
 ) -> bytes:
     state = state or _UIFormState()
     escaped_output = html.escape(result.output[:20000]) if result and result.ok else ""
     page = Template(_PAGE_TEMPLATE).safe_substitute(
+    dashboard_block=_render_dashboard_block(state),
         preset_block=_render_preset_block(),
         result_block=_render_result_block(result, escaped_output),
+    batch_result_block=_render_batch_result_block(batch_result),
         history_block=_render_history_block(),
         presets_json=json.dumps(_PRESETS, ensure_ascii=True),
         url=html.escape(state.url),
@@ -1416,7 +1688,7 @@ def _make_handler():
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
-            if path != "/extract":
+            if path not in {"/extract", "/batch"}:
                 self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
                 return
 
@@ -1426,8 +1698,14 @@ def _make_handler():
                 return
 
             form_data = self.rfile.read(content_length)
-            result, state = _extract_from_form(form_data)
-            self._send_html(_render_page(state=state, result=result))
+            if path == "/extract":
+                result, state = _extract_from_form(form_data)
+                self._send_html(_render_page(state=state, result=result))
+                return
+
+            batch_result, urls = _extract_batch_from_form(form_data)
+            batch_state = _UIFormState(url=urls[0] if urls else "")
+            self._send_html(_render_page(state=batch_state, batch_result=batch_result))
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             log.debug("UI server: " + format % args)
