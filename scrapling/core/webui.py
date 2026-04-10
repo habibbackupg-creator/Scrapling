@@ -393,9 +393,37 @@ _PAGE_TEMPLATE = """<!doctype html>
       color: var(--muted);
       font-size: 0.9rem;
     }
+    .help-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .help-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 12px;
+    }
+    .help-card h3 {
+      margin: 0 0 8px;
+      font-size: 0.95rem;
+      color: var(--accent-2);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .help-card ul {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+    .help-card li {
+      margin: 4px 0;
+    }
     @media (max-width: 900px) {
       .wizard-grid { grid-template-columns: 1fr; }
       .wizard-grid .btn { width: 100%; }
+      .help-grid { grid-template-columns: 1fr; }
       .grid-3 { grid-template-columns: 1fr; }
       .preset-grid { grid-template-columns: 1fr; }
         .preset-toolbar { grid-template-columns: 1fr; }
@@ -443,6 +471,29 @@ _PAGE_TEMPLATE = """<!doctype html>
           <div>
             <label for=\"css_selector\">CSS Selector (optional)</label>
             <input id=\"css_selector\" name=\"css_selector\" type=\"text\" value=\"$css_selector\" placeholder=\"h1, .title, article p\" />
+
+        <div class="help-grid">
+          <div class="help-card">
+            <h3>User Manual</h3>
+            <ul>
+              <li>Step 1: Enter your target URL in Guided Mode.</li>
+              <li>Step 2: Select a goal: Contact, Lead, Competitor, or Marketing.</li>
+              <li>Step 3: Click Smart Defaults + Run to auto-fill and execute.</li>
+              <li>Review summary signals, then open full output if required.</li>
+              <li>Save useful setups from Preset Studio for reuse.</li>
+            </ul>
+          </div>
+          <div class="help-card">
+            <h3>User Benefits</h3>
+            <ul>
+              <li>Faster setup with guided, goal-based defaults.</li>
+              <li>Better lead prioritization with scoring and contact signals.</li>
+              <li>Reduced manual errors through one-click recommended settings.</li>
+              <li>Quick exports for reporting and downstream workflows.</li>
+              <li>Higher productivity by reusing presets across similar tasks.</li>
+            </ul>
+          </div>
+        </div>
           </div>
           <div>
             <label for=\"fmt\">Output Format</label>
