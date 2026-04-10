@@ -17,15 +17,14 @@ fi
 
 cd "$APP_DIR"
 
-if [[ ! -d "$VENV_DIR" ]]; then
-  "$PYTHON_BIN" -m venv "$VENV_DIR"
-fi
-
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-
 case "$MODE" in
   full-test)
+    if [[ ! -d "$VENV_DIR" ]]; then
+      "$PYTHON_BIN" -m venv "$VENV_DIR"
+    fi
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+
     python -m pip install --upgrade pip
     python -m pip install -e ".[all]"
     python -m pip install -r tests/requirements.txt
@@ -42,6 +41,12 @@ case "$MODE" in
     ;;
   ui)
     if [[ "${SCRAPLING_SKIP_INSTALL:-0}" != "1" ]]; then
+      if [[ ! -d "$VENV_DIR" ]]; then
+        "$PYTHON_BIN" -m venv "$VENV_DIR"
+      fi
+      # shellcheck disable=SC1091
+      source "$VENV_DIR/bin/activate"
+
       python -m pip install --upgrade pip
       # Install only what web UI needs when running outside App Platform build step.
       python -m pip install -e ".[fetchers]"

@@ -39,6 +39,7 @@ nav = [
         ]},
         {"Command Line Interface" = [
             {Overview = "cli/overview.md"},
+            {"Web UI user guide" = "cli/web-ui-user-guide.md"},
             {"Interactive shell" = "cli/interactive-shell.md"},
             {"Extract commands" = "cli/extract-commands.md"}
         ]},

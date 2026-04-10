@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import threading
 import uuid
 import webbrowser
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -213,6 +214,41 @@ _PAGE_TEMPLATE = """<!doctype html>
       color: var(--muted);
       font-size: 0.92rem;
     }
+    .insight-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .insight-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px;
+    }
+    .insight-title {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+    .insight-list {
+      margin: 0;
+      padding-left: 18px;
+    }
+    .insight-list li {
+      margin: 3px 0;
+      word-break: break-word;
+      font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+      font-size: 0.9rem;
+    }
+    .insight-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -247,6 +283,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     }
     @media (max-width: 760px) {
       .grid-2 { grid-template-columns: 1fr; }
+      .insight-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -640,6 +677,13 @@ class _ExtractResult:
     output: str = ""
     message: str = ""
     download_id: str = ""
+    emails: list[str] = field(default_factory=list)
+    phones: list[str] = field(default_factory=list)
+    links: list[str] = field(default_factory=list)
+    social_links: dict[str, list[str]] = field(default_factory=dict)
+    cta_links: list[str] = field(default_factory=list)
+    tracker_hits: list[str] = field(default_factory=list)
+    insights_download_id: str = ""
 
 
 @dataclass
@@ -657,6 +701,43 @@ _HISTORY: deque[_HistoryEntry] = deque(maxlen=25)
 _DOWNLOADS: dict[str, tuple[bytes, str, str]] = {}
 _DOWNLOAD_ORDER: deque[str] = deque(maxlen=25)
 _STATE_LOCK = Lock()
+
+_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_HTTP_URL_PATTERN = re.compile(r"https?://[^\s<>'\"\]\)]+", re.IGNORECASE)
+_HREF_PATTERN = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+_MAILTO_PATTERN = re.compile(r"mailto:([^\s?&#\"'>]+)", re.IGNORECASE)
+_PHONE_PATTERN = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+_CTA_HINTS = (
+  "/contact",
+  "/demo",
+  "/book",
+  "/pricing",
+  "/trial",
+  "/signup",
+  "/register",
+  "/get-started",
+  "/quote",
+  "/consult",
+)
+
+_TRACKER_SIGNATURES: dict[str, tuple[str, ...]] = {
+  "Google Analytics": ("googletagmanager.com/gtag", "google-analytics.com", "gtag('config'", "ga("),
+  "Google Tag Manager": ("googletagmanager.com/gtm", "gtm.js", "dataLayer.push"),
+  "Meta Pixel": ("connect.facebook.net/en_US/fbevents.js", "fbq('init'", "fbq(\"init\""),
+  "LinkedIn Insight": ("snap.licdn.com/li.lms-analytics/insight.min.js", "_linkedin_partner_id"),
+  "TikTok Pixel": ("analytics.tiktok.com/i18n/pixel", "ttq.track", "tiktok pixel"),
+  "HubSpot": ("js.hs-scripts.com", "hubspot"),
+  "Segment": ("cdn.segment.com/analytics.js", "analytics.track("),
+}
+
+_SOCIAL_DOMAINS: dict[str, tuple[str, ...]] = {
+    "LinkedIn": ("linkedin.com",),
+    "X/Twitter": ("x.com", "twitter.com"),
+    "Facebook": ("facebook.com", "fb.com"),
+    "Instagram": ("instagram.com",),
+    "YouTube": ("youtube.com", "youtu.be"),
+    "TikTok": ("tiktok.com",),
+}
 
 _PRESETS = {
     "company_contact": {
@@ -773,6 +854,25 @@ _PRESETS = {
         "cookies_text": "",
         "proxy": "",
     },
+      "marketing_automation": {
+        "title": "Marketing Automation Audit",
+        "description": "Capture conversion links, social channels, contacts, and tracking signals.",
+        "category": "marketing",
+        "group": "builtin",
+        "url": "https://example.com",
+        "css_selector": 'a[href], script, form, [class*="pricing"], [class*="cta"], [class*="contact"]',
+        "fmt": "txt",
+        "impersonate": "chrome",
+        "timeout": 30,
+        "ai_targeted": False,
+        "follow_redirects": True,
+        "verify": True,
+        "stealthy_headers": True,
+        "headers_text": "",
+        "params_text": "",
+        "cookies_text": "",
+        "proxy": "",
+      },
 }
 
 
@@ -827,6 +927,104 @@ def _render_format_options(selected: str) -> str:
     return "".join(chunks)
 
 
+def _unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        key = value.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(value.strip())
+    return output
+
+
+def _clean_link(link: str) -> str:
+    return link.strip().rstrip(".,;:!?)]}>")
+
+
+def _extract_contact_insights(raw_output: str) -> tuple[list[str], list[str], list[str], dict[str, list[str]]]:
+    content = html.unescape(raw_output or "")
+
+    emails: list[str] = []
+    emails.extend(_EMAIL_PATTERN.findall(content))
+    emails.extend(_MAILTO_PATTERN.findall(content))
+    emails = _unique_preserve_order([email.lower() for email in emails])
+
+    phones = _unique_preserve_order(_PHONE_PATTERN.findall(content))
+
+    discovered_links: list[str] = []
+    discovered_links.extend(_HTTP_URL_PATTERN.findall(content))
+    discovered_links.extend(_HREF_PATTERN.findall(content))
+
+    links = _unique_preserve_order(
+        [
+            _clean_link(link)
+            for link in discovered_links
+            if link and link.lower().startswith(("http://", "https://"))
+        ]
+    )
+
+    social_links: dict[str, list[str]] = {platform: [] for platform in _SOCIAL_DOMAINS}
+    for link in links:
+        parsed = urlsplit(link)
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            continue
+
+        for platform, domains in _SOCIAL_DOMAINS.items():
+            if any(hostname == domain or hostname.endswith(f".{domain}") for domain in domains):
+                social_links[platform].append(link)
+
+    cleaned_social_links = {
+        platform: _unique_preserve_order(platform_links)
+        for platform, platform_links in social_links.items()
+        if platform_links
+    }
+
+    return emails, phones, links, cleaned_social_links
+
+
+def _extract_marketing_insights(raw_output: str, links: list[str]) -> tuple[list[str], list[str]]:
+    content = html.unescape(raw_output or "")
+    lowered = content.lower()
+
+    cta_links = _unique_preserve_order(
+        [link for link in links if any(hint in link.lower() for hint in _CTA_HINTS)]
+    )
+
+    tracker_hits: list[str] = []
+    for tracker_name, signatures in _TRACKER_SIGNATURES.items():
+        if any(signature.lower() in lowered for signature in signatures):
+            tracker_hits.append(tracker_name)
+
+    return cta_links, tracker_hits
+
+
+def _build_marketing_payload(result: _ExtractResult, state: _UIFormState) -> str:
+    payload = {
+        "url": state.url,
+        "format": state.fmt,
+        "http_status": result.status,
+        "counts": {
+            "emails": len(result.emails),
+            "phones": len(result.phones),
+            "social_links": sum(len(items) for items in result.social_links.values()),
+            "links": len(result.links),
+            "cta_links": len(result.cta_links),
+            "tracker_hits": len(result.tracker_hits),
+        },
+        "emails": result.emails,
+        "phones": result.phones,
+        "social_links": result.social_links,
+        "cta_links": result.cta_links,
+        "tracker_hits": result.tracker_hits,
+        "top_links": result.links[:40],
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def _convert_response(response, css_selector: str, fmt: str, ai_targeted: bool) -> str:
     extraction_type = Convertor._extension_map.get(fmt, "markdown")
     return "".join(
@@ -844,6 +1042,7 @@ def _cache_download(output: str, fmt: str) -> str:
         "md": "text/markdown; charset=utf-8",
         "html": "text/html; charset=utf-8",
         "txt": "text/plain; charset=utf-8",
+    "json": "application/json; charset=utf-8",
     }.get(fmt, "text/plain; charset=utf-8")
     filename = f"scrapling-output.{fmt}"
     download_id = uuid.uuid4().hex
@@ -878,12 +1077,107 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
 
     if result.ok:
         download_link = f'/download/{result.download_id}' if result.download_id else "#"
+        insights_download_link = f'/download/{result.insights_download_id}' if result.insights_download_id else "#"
+
+        email_items = (
+            "".join(
+                f'<li><a href="mailto:{html.escape(email)}">{html.escape(email)}</a></li>'
+                for email in result.emails
+            )
+            if result.emails
+            else '<li class="insight-note">No emails detected.</li>'
+        )
+
+        phone_items = (
+            "".join(f"<li>{html.escape(phone)}</li>" for phone in result.phones)
+            if result.phones
+            else '<li class="insight-note">No phone numbers detected.</li>'
+        )
+
+        if result.social_links:
+            social_rows = []
+            for platform, links in sorted(result.social_links.items(), key=lambda item: item[0]):
+                items = "".join(
+                    f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
+                    for link in links
+                )
+                social_rows.append(
+                    '<details>'
+                    f'<summary>{html.escape(platform)} ({len(links)})</summary>'
+                    f'<ul class="insight-list" style="margin-top:6px">{items}</ul>'
+                    '</details>'
+                )
+            social_block = "".join(social_rows)
+        else:
+            social_block = '<p class="insight-note">No social profile links detected.</p>'
+
+        link_items = (
+            "".join(
+                f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
+                for link in result.links[:40]
+            )
+            if result.links
+            else '<li class="insight-note">No links detected.</li>'
+        )
+
+        cta_items = (
+            "".join(
+                f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
+                for link in result.cta_links[:20]
+            )
+            if result.cta_links
+            else '<li class="insight-note">No CTA links detected.</li>'
+        )
+
+        tracker_items = (
+            "".join(f"<li>{html.escape(item)}</li>" for item in result.tracker_hits)
+            if result.tracker_hits
+            else '<li class="insight-note">No known tracker/pixel signatures detected.</li>'
+        )
+
+        stats_line = (
+            f'Emails: {len(result.emails)} | '
+            f'Phones: {len(result.phones)} | '
+            f'Social links: {sum(len(v) for v in result.social_links.values())} | '
+            f'All links: {len(result.links)} | '
+            f'CTA links: {len(result.cta_links)} | '
+            f'Trackers: {len(result.tracker_hits)}'
+        )
+
         return (
             '<section class="card">'
             '<div class="status-ok">Extraction completed</div>'
             f'<div class="meta">HTTP status: {result.status}</div>'
+            f'<div class="meta">{html.escape(stats_line)}</div>'
             '<div class="actions" style="margin-top:10px">'
             f'<a class="btn secondary" href="{download_link}">Download output</a>'
+            f'<a class="btn ghost" href="{insights_download_link}">Download marketing JSON</a>'
+            '</div>'
+            '<div class="insight-grid">'
+            '<div class="insight-card">'
+            '<h3 class="insight-title">Detected Emails</h3>'
+            f'<ul class="insight-list">{email_items}</ul>'
+            '</div>'
+            '<div class="insight-card">'
+            '<h3 class="insight-title">Detected Phone Numbers</h3>'
+            f'<ul class="insight-list">{phone_items}</ul>'
+            '</div>'
+            '<div class="insight-card">'
+            '<h3 class="insight-title">Detected Social Links</h3>'
+            f'{social_block}'
+            '</div>'
+            '<div class="insight-card">'
+            '<h3 class="insight-title">Detected Links (Top 40)</h3>'
+            f'<ul class="insight-list">{link_items}</ul>'
+            '</div>'
+            '<div class="insight-card">'
+            '<h3 class="insight-title">Conversion / CTA Links</h3>'
+            f'<ul class="insight-list">{cta_items}</ul>'
+            '</div>'
+            '<div class="insight-card">'
+            '<h3 class="insight-title">Marketing Trackers / Pixels</h3>'
+            f'<ul class="insight-list">{tracker_items}</ul>'
+            '</div>'
             '</div>'
             '<label style="margin-top:10px">Preview</label>'
             f'<pre>{escaped_preview}</pre>'
@@ -913,6 +1207,7 @@ def _render_preset_block() -> str:
     '<option value="social">Social</option>'
     '<option value="lead">Lead</option>'
     '<option value="industry">Industry</option>'
+    '<option value="marketing">Marketing</option>'
     '</select>'
     '</div>'
     '<div class="preset-save-row">'
@@ -972,7 +1267,7 @@ def _render_page(
         preset_block=_render_preset_block(),
         result_block=_render_result_block(result, escaped_output),
         history_block=_render_history_block(),
-      presets_json=json.dumps(_PRESETS, ensure_ascii=True),
+        presets_json=json.dumps(_PRESETS, ensure_ascii=True),
         url=html.escape(state.url),
         css_selector=html.escape(state.css_selector),
         format_options=_render_format_options(state.fmt),
@@ -1055,12 +1350,21 @@ def _extract_from_form(form_data: bytes) -> tuple[_ExtractResult, _UIFormState]:
             stealthy_headers=state.stealthy_headers,
         )
         output = _convert_response(response, state.css_selector, state.fmt, state.ai_targeted)
+        emails, phones, links, social_links = _extract_contact_insights(output)
+        cta_links, tracker_hits = _extract_marketing_insights(output, links)
         result = _ExtractResult(
             ok=True,
             status=response.status,
             output=output,
             download_id=_cache_download(output, state.fmt),
+            emails=emails,
+            phones=phones,
+            links=links,
+            social_links=social_links,
+            cta_links=cta_links,
+            tracker_hits=tracker_hits,
         )
+        result.insights_download_id = _cache_download(_build_marketing_payload(result, state), "json")
         _record_history(result, state)
         return result, state
     except Exception as exc:  # pragma: no cover

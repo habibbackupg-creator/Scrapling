@@ -25,6 +25,8 @@ scrapling ui --open-browser
 ### Built-in Web Interface (Real-world workflow)
 Use the built-in UI when you want a full extraction workflow without writing scripts.
 
+For a full walkthrough, see the [Web UI User Guide](web-ui-user-guide.md).
+
 - Supports URL + CSS selector extraction
 - Supports output formats (`md`, `html`, `txt`)
 - Supports request controls: headers, cookies, query params, proxy, timeout, impersonation
