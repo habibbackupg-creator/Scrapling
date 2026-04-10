@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from string import Template
 from threading import Lock
 from typing import Optional
-from urllib.parse import parse_qs, parse_qsl, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
 from scrapling.core.shell import Convertor
 from scrapling.core.utils import log
@@ -104,6 +104,32 @@ _PAGE_TEMPLATE = """<!doctype html>
     .email-hint { color: #f59e0b; font-size: 0.8rem; }
     .duplicate-badge { background: #fee2e2; color: #991b1b; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
     .filter-panel { margin-bottom: 12px; padding: 10px; background: #f8f3e8; border-radius: 10px; }
+    .batch-tools-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 8px 0;
+    }
+    .csv-columns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .csv-columns label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      font-weight: 500;
+    }
+    .schedule-list {
+      margin-top: 10px;
+      padding-left: 18px;
+      color: var(--muted);
+    }
     .workflow-chip { padding: 8px; background: #fff; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 0.85rem; text-align: center; display: inline-block; margin: 4px; }
     .workflow-chip:hover { background: #f0f0f0; }
     * { box-sizing: border-box; }
@@ -432,6 +458,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     @media (max-width: 760px) {
       .grid-2 { grid-template-columns: 1fr; }
       .insight-grid { grid-template-columns: 1fr; }
+      .batch-tools-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -442,7 +469,7 @@ _PAGE_TEMPLATE = """<!doctype html>
       <h1>Scrapling Built-in Interface</h1>
       <p>Fetch a page and extract full content or selected nodes without writing a script.</p>
 
-      <div class=\"wizard\">
+      <div class=\"wizard\"> 
         <div class=\"section-title\" style=\"margin-top:0\">Guided Mode</div>
         <div class=\"wizard-grid\">
           <label class=\"wizard-step\" for=\"wizard_url\">
@@ -461,6 +488,30 @@ _PAGE_TEMPLATE = """<!doctype html>
           <button id=\"wizard_apply_run\" class=\"btn\" type=\"button\">Step 3: Smart Defaults + Run</button>
         </div>
         <div id=\"wizard_summary\" class=\"wizard-summary\"></div>
+        <div id=\"workflows_list\" style=\"margin-top:8px\"></div>
+      </div>
+
+      <div class=\"help-grid\">
+        <div class=\"help-card\">
+          <h3>User Manual</h3>
+          <ul>
+            <li>Step 1: Enter your target URL in Guided Mode.</li>
+            <li>Step 2: Select a goal: Contact, Lead, Competitor, or Marketing.</li>
+            <li>Step 3: Click Smart Defaults + Run to auto-fill and execute.</li>
+            <li>Review summary signals, then open full output if required.</li>
+            <li>Save useful setups from Preset Studio for reuse.</li>
+          </ul>
+        </div>
+        <div class=\"help-card\">
+          <h3>User Benefits</h3>
+          <ul>
+            <li>Faster setup with guided, goal-based defaults.</li>
+            <li>Better lead prioritization with scoring and contact signals.</li>
+            <li>Reduced manual errors through one-click recommended settings.</li>
+            <li>Quick exports for reporting and downstream workflows.</li>
+            <li>Higher productivity by reusing presets across similar tasks.</li>
+          </ul>
+        </div>
       </div>
 
       <form method=\"post\" action=\"/extract\">
@@ -472,28 +523,6 @@ _PAGE_TEMPLATE = """<!doctype html>
             <label for=\"css_selector\">CSS Selector (optional)</label>
             <input id=\"css_selector\" name=\"css_selector\" type=\"text\" value=\"$css_selector\" placeholder=\"h1, .title, article p\" />
 
-        <div class="help-grid">
-          <div class="help-card">
-            <h3>User Manual</h3>
-            <ul>
-              <li>Step 1: Enter your target URL in Guided Mode.</li>
-              <li>Step 2: Select a goal: Contact, Lead, Competitor, or Marketing.</li>
-              <li>Step 3: Click Smart Defaults + Run to auto-fill and execute.</li>
-              <li>Review summary signals, then open full output if required.</li>
-              <li>Save useful setups from Preset Studio for reuse.</li>
-            </ul>
-          </div>
-          <div class="help-card">
-            <h3>User Benefits</h3>
-            <ul>
-              <li>Faster setup with guided, goal-based defaults.</li>
-              <li>Better lead prioritization with scoring and contact signals.</li>
-              <li>Reduced manual errors through one-click recommended settings.</li>
-              <li>Quick exports for reporting and downstream workflows.</li>
-              <li>Higher productivity by reusing presets across similar tasks.</li>
-            </ul>
-          </div>
-        </div>
           </div>
           <div>
             <label for=\"fmt\">Output Format</label>
@@ -549,6 +578,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     $preset_block
     $result_block
     $batch_result_block
+    $schedule_block
     $history_block
   </main>
 
@@ -558,6 +588,7 @@ _PAGE_TEMPLATE = """<!doctype html>
     const CUSTOM_PRESETS_KEY = 'scrapling.ui.customPresets';
     const THEME_KEY = 'scrapling.ui.theme';
     const WORKFLOWS_KEY = 'scrapling.ui.workflows';
+    const CSV_COLUMNS_KEY = 'scrapling.ui.csvColumns';
     const GOAL_PRESET_MAP = {
       contact: 'company_contact',
       lead: 'saas_lead_hunt',
@@ -948,6 +979,86 @@ _PAGE_TEMPLATE = """<!doctype html>
       ).join('');
     }
 
+    function getSelectedCsvColumns() {
+      const defaultColumns = ['url', 'status', 'score', 'emails', 'phones', 'cta', 'trackers', 'notes'];
+      const raw = localStorage.getItem(CSV_COLUMNS_KEY);
+      if (!raw) {
+        return defaultColumns;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.length ? parsed : defaultColumns;
+      } catch (error) {
+        return defaultColumns;
+      }
+    }
+
+    function persistCsvColumns() {
+      const selected = Array.from(document.querySelectorAll('.csv-col-toggle:checked')).map((node) => node.value);
+      localStorage.setItem(CSV_COLUMNS_KEY, JSON.stringify(selected));
+      return selected;
+    }
+
+    function applyBatchFilters() {
+      const minScore = Number(readField('batch_filter_score') || '0');
+      const domainNeedle = (readField('batch_filter_domain') || '').trim().toLowerCase();
+      const statusFilter = readField('batch_filter_status') || 'all';
+      const emailNeedle = (readField('batch_filter_email') || '').trim().toLowerCase();
+
+      document.querySelectorAll('tr[data-batch-row="1"]').forEach((row) => {
+        const score = Number(row.getAttribute('data-score') || '0');
+        const status = row.getAttribute('data-status') || '';
+        const domain = (row.getAttribute('data-domain') || '').toLowerCase();
+        const emails = (row.getAttribute('data-emails') || '').toLowerCase();
+
+        const scoreMatch = score >= minScore;
+        const domainMatch = !domainNeedle || domain.includes(domainNeedle);
+        const statusMatch = statusFilter === 'all' || status === statusFilter;
+        const emailMatch = !emailNeedle || emails.includes(emailNeedle);
+
+        row.style.display = scoreMatch && domainMatch && statusMatch && emailMatch ? '' : 'none';
+      });
+    }
+
+    function downloadCustomCsv() {
+      const columns = persistCsvColumns();
+      const headers = {
+        url: 'url',
+        status: 'status',
+        score: 'lead_score',
+        emails: 'emails',
+        phones: 'phones',
+        cta: 'cta_links',
+        trackers: 'tracker_hits',
+        notes: 'notes'
+      };
+      const lines = [columns.map((c) => headers[c] || c).join(',')];
+
+      document.querySelectorAll('tr[data-batch-row="1"]').forEach((row) => {
+        if (row.style.display === 'none') {
+          return;
+        }
+        const rowValues = {
+          url: row.getAttribute('data-url') || '',
+          status: row.getAttribute('data-status-text') || '',
+          score: row.getAttribute('data-score') || '0',
+          emails: row.getAttribute('data-email-count') || '0',
+          phones: row.getAttribute('data-phone-count') || '0',
+          cta: row.getAttribute('data-cta-count') || '0',
+          trackers: row.getAttribute('data-tracker-count') || '0',
+          notes: row.getAttribute('data-notes') || ''
+        };
+        lines.push(columns.map((c) => jsonSafeCsv(rowValues[c] || '')).join(','));
+      });
+
+      downloadTextFile('scrapling-custom-batch.csv', lines.join('\n'), 'text/csv;charset=utf-8');
+    }
+
+    function jsonSafeCsv(value) {
+      const text = String(value ?? '');
+      return '"' + text.replaceAll('"', '""') + '"';
+    }
+
     function updateWizardSummary() {
       const goal = readField('wizard_goal') || 'contact';
       const summary = document.getElementById('wizard_summary');
@@ -1012,6 +1123,11 @@ _PAGE_TEMPLATE = """<!doctype html>
       const wizardGoal = document.getElementById('wizard_goal');
       const wizardApplyRunBtn = document.getElementById('wizard_apply_run');
       const themeToggle = document.getElementById('theme_toggle');
+      const batchFilterScore = document.getElementById('batch_filter_score');
+      const batchFilterDomain = document.getElementById('batch_filter_domain');
+      const batchFilterStatus = document.getElementById('batch_filter_status');
+      const batchFilterEmail = document.getElementById('batch_filter_email');
+      const batchCsvBtn = document.getElementById('download_custom_csv');
 
       if (wizardUrl) {
         wizardUrl.value = readField('url') || '';
@@ -1049,6 +1165,25 @@ _PAGE_TEMPLATE = """<!doctype html>
       if (themeToggle) {
         themeToggle.addEventListener('click', toggleTheme);
       }
+
+      if (batchFilterScore) {
+        batchFilterScore.addEventListener('input', applyBatchFilters);
+      }
+      if (batchFilterDomain) {
+        batchFilterDomain.addEventListener('input', applyBatchFilters);
+      }
+      if (batchFilterStatus) {
+        batchFilterStatus.addEventListener('change', applyBatchFilters);
+      }
+      if (batchFilterEmail) {
+        batchFilterEmail.addEventListener('input', applyBatchFilters);
+      }
+      if (batchCsvBtn) {
+        batchCsvBtn.addEventListener('click', downloadCustomCsv);
+      }
+      document.querySelectorAll('.csv-col-toggle').forEach((node) => {
+        node.addEventListener('change', persistCsvColumns);
+      });
 
       document.querySelectorAll('input, textarea, select').forEach((element) => {
         element.addEventListener('input', saveState);
@@ -1154,6 +1289,7 @@ class _HistoryEntry:
 _HISTORY: deque[_HistoryEntry] = deque(maxlen=25)
 _DOWNLOADS: dict[str, tuple[bytes, str, str]] = {}
 _DOWNLOAD_ORDER: deque[str] = deque(maxlen=25)
+_SCHEDULED_RUNS: deque[dict[str, str]] = deque(maxlen=50)
 _STATE_LOCK = Lock()
 
 _EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
@@ -1855,6 +1991,14 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
         insights_download_link = f'/download/{result.insights_download_id}' if result.insights_download_id else "#"
         lead_score_label = _lead_score_label(result.lead_score)
         comparison_block = f'<div class="meta">{html.escape(result.comparison_summary)}</div>' if result.comparison_summary else ""
+        visual_diff_block = (
+            '<div class="insight-card" style="margin-top:10px">'
+            '<h3 class="insight-title">Visual Diff (vs previous run)</h3>'
+            f'<p class="insight-note">{html.escape(result.comparison_summary)}</p>'
+            '</div>'
+            if result.comparison_summary
+            else ''
+        )
         full_output = html.escape(result.output)
 
         email_items = "".join(
@@ -1881,6 +2025,13 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
         return (
             '<section class="card">'
             '<div class="status-ok">Extraction completed</div>'
+          '<div class="result-summary">'
+          f'<div class="summary-item"><span class="summary-value">{result.lead_score}</span><span class="summary-label">Lead Score</span></div>'
+          f'<div class="summary-item"><span class="summary-value">{len(result.emails)}</span><span class="summary-label">Emails</span></div>'
+          f'<div class="summary-item"><span class="summary-value">{len(result.phones)}</span><span class="summary-label">Phones</span></div>'
+          f'<div class="summary-item"><span class="summary-value">{len(result.cta_links)}</span><span class="summary-label">CTA</span></div>'
+          f'<div class="summary-item"><span class="summary-value">{len(result.tracker_hits)}</span><span class="summary-label">Trackers</span></div>'
+          '</div>'
             f'<div class="meta"><strong>Lead score:</strong> {result.lead_score}/100 ({html.escape(lead_score_label)})</div>'
             f'<div class="meta">HTTP status: {result.status}</div>'
             f'<div class="meta">{html.escape(stats_line)}</div>'
@@ -1915,8 +2066,13 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
             f'<ul class="insight-list">{tracker_items}</ul>'
             '</div>'
             '</div>'
-            '<label style="margin-top:10px">Preview</label>'
+            f'{visual_diff_block}'
+            '<details class="full-output" open>'
+            '<summary>Preview (first 20,000 chars)</summary>'
+            '<div class="details-body">'
             f'<pre>{escaped_preview}</pre>'
+            '</div>'
+            '</details>'
             '<details class="full-output">'
             '<summary>Show full output</summary>'
             '<div class="details-body">'
@@ -2024,25 +2180,78 @@ def _render_batch_result_block(result: Optional[_BatchResult]) -> str:
         )
 
     rows = []
+    email_frequency: dict[str, int] = {}
     for row in result.rows:
-        rows.append(
-            '<tr>'
-            f'<td class="mono">{html.escape(row.url)}</td>'
-            f'<td>{"OK" if row.ok else "FAILED"}</td>'
-            f'<td>{row.status if row.status is not None else "-"}</td>'
-            f'<td>{row.lead_score}</td>'
-            f'<td>{len(row.emails)}</td>'
-            f'<td>{len(row.phones)}</td>'
-            f'<td>{len(row.cta_links)}</td>'
-            f'<td>{len(row.tracker_hits)}</td>'
-            f'<td class="mono">{html.escape(row.error[:160]) if row.error else "-"}</td>'
-            '</tr>'
-        )
+      for email in row.emails:
+        email_frequency[email] = email_frequency.get(email, 0) + 1
+
+    duplicate_emails = sorted([email for email, count in email_frequency.items() if count > 1])
+    duplicate_summary = (
+      f'Duplicate emails detected across URLs: {len(duplicate_emails)}'
+      if duplicate_emails
+      else 'No duplicate emails detected across URLs.'
+    )
+
+    for row in result.rows:
+      domain = (urlsplit(row.url).hostname or "").lower()
+      emails_blob = "|".join(row.emails)
+      status_text = "OK" if row.ok else "FAILED"
+      duplicate_count = len([email for email in row.emails if email in duplicate_emails])
+      notes = row.error[:160] if row.error else ""
+      duplicate_badge = (
+        f' <span class="duplicate-badge">{duplicate_count} duplicates</span>' if duplicate_count else ''
+      )
+      rows.append(
+        '<tr data-batch-row="1" '
+        f'data-url="{html.escape(row.url)}" '
+        f'data-score="{row.lead_score}" '
+        f'data-status="{status_text}" '
+        f'data-status-text="{status_text}" '
+        f'data-domain="{html.escape(domain)}" '
+        f'data-emails="{html.escape(emails_blob)}" '
+        f'data-email-count="{len(row.emails)}" '
+        f'data-phone-count="{len(row.phones)}" '
+        f'data-cta-count="{len(row.cta_links)}" '
+        f'data-tracker-count="{len(row.tracker_hits)}" '
+        f'data-notes="{html.escape(notes)}">'
+        f'<td class="mono">{html.escape(row.url)}</td>'
+        f'<td>{status_text}</td>'
+        f'<td>{row.status if row.status is not None else "-"}</td>'
+        f'<td>{row.lead_score}</td>'
+        f'<td>{len(row.emails)}{duplicate_badge}</td>'
+        f'<td>{len(row.phones)}</td>'
+        f'<td>{len(row.cta_links)}</td>'
+        f'<td>{len(row.tracker_hits)}</td>'
+        f'<td class="mono">{html.escape(notes) if notes else "-"}</td>'
+        '</tr>'
+      )
 
     return (
         '<section class="card">'
         '<div class="status-ok">Bulk audit completed</div>'
         f'<div class="meta">Processed: {result.total_urls} | Success: {result.success_count} | Failed: {result.failed_count}</div>'
+        f'<div class="meta">{html.escape(duplicate_summary)}</div>'
+        '<div class="filter-panel">'
+        '<div class="section-title" style="margin-top:0">Advanced Filtering</div>'
+        '<div class="batch-tools-grid">'
+        '<div><label for="batch_filter_score">Min Lead Score</label><input id="batch_filter_score" type="number" min="0" max="100" value="0" /></div>'
+        '<div><label for="batch_filter_domain">Domain Contains</label><input id="batch_filter_domain" type="text" placeholder="example.com" /></div>'
+        '<div><label for="batch_filter_status">Status</label><select id="batch_filter_status"><option value="all">All</option><option value="OK">OK</option><option value="FAILED">FAILED</option></select></div>'
+        '<div><label for="batch_filter_email">Email Contains</label><input id="batch_filter_email" type="text" placeholder="sales@" /></div>'
+        '</div>'
+        '<div class="section-title" style="margin-top:10px">Smart CSV Export</div>'
+        '<div class="csv-columns">'
+        '<label><input class="csv-col-toggle" type="checkbox" value="url" checked /> URL</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="status" checked /> Status</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="score" checked /> Score</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="emails" checked /> Emails</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="phones" checked /> Phones</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="cta" checked /> CTA</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="trackers" checked /> Trackers</label>'
+        '<label><input class="csv-col-toggle" type="checkbox" value="notes" checked /> Notes</label>'
+        '</div>'
+        '<div class="actions" style="margin-top:10px"><button id="download_custom_csv" class="btn ghost" type="button">Download Filtered Custom CSV</button></div>'
+        '</div>'
         '<div class="actions" style="margin-top:10px">'
         f'<a class="btn secondary" href="{f"/download/{result.download_id}" if result.download_id else "#"}">Download JSON</a>'
         f'<a class="btn ghost" href="{f"/download/{result.csv_download_id}" if result.csv_download_id else "#"}">Download CSV</a>'
@@ -2092,6 +2301,34 @@ def _render_history_block() -> str:
     )
 
 
+def _render_schedule_block() -> str:
+    with _STATE_LOCK:
+        schedules = list(_SCHEDULED_RUNS)
+
+    schedule_items = "".join(
+        f'<li><span class="mono">{html.escape(item.get("url", ""))}</span> | goal: {html.escape(item.get("goal", "contact"))} | cron: {html.escape(item.get("cron", ""))}</li>'
+        for item in schedules
+    ) or '<li>No scheduled runs configured yet.</li>'
+
+    return (
+        '<section class="card">'
+        '<div class="section-title" style="margin-top:0">Scheduled Runs (Stub)</div>'
+        '<p>Define recurring targets now; execution engine can be wired in later without changing UI workflows.</p>'
+        '<form method="post" action="/schedule">'
+        '<div class="grid-3">'
+        '<div><label for="schedule_url">URL</label><input id="schedule_url" name="schedule_url" type="url" placeholder="https://example.com" required /></div>'
+        '<div><label for="schedule_goal">Goal</label><select id="schedule_goal" name="schedule_goal"><option value="contact">Contact</option><option value="lead">Lead</option><option value="competitor">Competitor</option><option value="marketing">Marketing</option></select></div>'
+        '<div><label for="schedule_cron">Schedule</label><input id="schedule_cron" name="schedule_cron" type="text" placeholder="daily 09:00 UTC" required /></div>'
+        '</div>'
+        '<div class="actions"><button class="btn" type="submit">Save Scheduled Run</button></div>'
+        '</form>'
+        '<ul class="schedule-list">'
+        f'{schedule_items}'
+        '</ul>'
+        '</section>'
+    )
+
+
 def _render_page(
     *,
     state: Optional[_UIFormState] = None,
@@ -2105,6 +2342,7 @@ def _render_page(
         preset_block=_render_preset_block(),
         result_block=_render_result_block(result, escaped_output),
     batch_result_block=_render_batch_result_block(batch_result),
+      schedule_block=_render_schedule_block(),
         history_block=_render_history_block(),
         presets_json=json.dumps(_PRESETS, ensure_ascii=True),
         url=html.escape(state.url),
@@ -2226,6 +2464,14 @@ def _make_handler():
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+            encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status.value)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
         def _send_download(self, download_id: str) -> None:
             with _STATE_LOCK:
                 payload = _DOWNLOADS.get(download_id)
@@ -2248,6 +2494,36 @@ def _make_handler():
                 self._send_html(_render_page())
                 return
 
+            if path == "/api/health":
+                self._send_json({"ok": True, "service": "ScraplingUI", "version": self.server_version})
+                return
+
+            if path == "/api/history":
+                with _STATE_LOCK:
+                    entries = list(_HISTORY)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "items": [
+                            {
+                                "created_at": entry.created_at,
+                                "url": entry.url,
+                                "status": entry.status,
+                                "lead_score": entry.lead_score,
+                                "ok": entry.ok,
+                            }
+                            for entry in entries
+                        ],
+                    }
+                )
+                return
+
+            if path == "/api/schedules":
+                with _STATE_LOCK:
+                    schedules = list(_SCHEDULED_RUNS)
+                self._send_json({"ok": True, "items": schedules})
+                return
+
             if path.startswith("/download/"):
                 download_id = path.replace("/download/", "", 1).strip()
                 self._send_download(download_id)
@@ -2257,7 +2533,7 @@ def _make_handler():
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
-            if path not in {"/extract", "/batch"}:
+            if path not in {"/extract", "/batch", "/schedule", "/api/extract", "/api/schedules"}:
                 self.send_error(HTTPStatus.NOT_FOUND.value, "Not found")
                 return
 
@@ -2267,9 +2543,75 @@ def _make_handler():
                 return
 
             form_data = self.rfile.read(content_length)
+
+            if path == "/api/extract":
+                try:
+                    payload = json.loads(form_data.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+                encoded = urlencode(
+                    {
+                        "url": payload.get("url", ""),
+                        "css_selector": payload.get("css_selector", ""),
+                        "fmt": payload.get("fmt", "txt"),
+                    }
+                ).encode("utf-8", errors="replace")
+                result, _ = _extract_from_form(encoded)
+                self._send_json(
+                    {
+                        "ok": result.ok,
+                        "status": result.status,
+                        "lead_score": result.lead_score,
+                        "emails": result.emails,
+                        "phones": result.phones,
+                        "links": result.links[:20],
+                        "tracker_hits": result.tracker_hits,
+                        "comparison_summary": result.comparison_summary,
+                        "download_id": result.download_id,
+                    },
+                    status=HTTPStatus.OK if result.ok else HTTPStatus.BAD_REQUEST,
+                )
+                return
+
+            if path == "/api/schedules":
+                try:
+                    payload = json.loads(form_data.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    self._send_json({"ok": False, "error": "Invalid JSON payload"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+
+                schedule = {
+                    "id": uuid.uuid4().hex,
+                    "url": str(payload.get("url", "")).strip(),
+                    "goal": str(payload.get("goal", "contact")).strip() or "contact",
+                    "cron": str(payload.get("cron", "")).strip(),
+                    "created_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+                with _STATE_LOCK:
+                    _SCHEDULED_RUNS.appendleft(schedule)
+                self._send_json({"ok": True, "item": schedule}, status=HTTPStatus.CREATED)
+                return
+
             if path == "/extract":
                 result, state = _extract_from_form(form_data)
                 self._send_html(_render_page(state=state, result=result))
+                return
+
+            if path == "/schedule":
+                parsed = parse_qs(form_data.decode("utf-8"), keep_blank_values=True)
+                schedule = {
+                    "id": uuid.uuid4().hex,
+                    "url": parsed.get("schedule_url", [""])[0].strip(),
+                    "goal": parsed.get("schedule_goal", ["contact"])[0].strip() or "contact",
+                    "cron": parsed.get("schedule_cron", [""])[0].strip(),
+                    "created_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+                if schedule["url"]:
+                    with _STATE_LOCK:
+                        _SCHEDULED_RUNS.appendleft(schedule)
+                self._send_html(_render_page())
                 return
 
             batch_result, urls = _extract_batch_from_form(form_data)
