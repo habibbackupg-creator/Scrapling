@@ -187,6 +187,20 @@ def shell(code, level):
     console.start()
 
 
+@command(help="Run Scrapling's built-in local web interface.")
+@option("--host", type=str, default="127.0.0.1", help="Host to bind the web UI server to (default: 127.0.0.1)")
+@option("--port", type=int, default=7788, help="Port to bind the web UI server to (default: 7788)")
+@option(
+    "--open-browser/--no-open-browser",
+    default=True,
+    help="Open the default browser automatically (default: True)",
+)
+def ui(host, port, open_browser):
+    from scrapling.core.webui import run_web_ui
+
+    run_web_ui(host=host, port=port, open_browser=open_browser)
+
+
 @group(
     help="Fetch web pages using various fetchers and extract full/selected HTML content as HTML, Markdown, or extract text content."
 )
@@ -635,3 +649,4 @@ main.add_command(install)
 main.add_command(shell)
 main.add_command(extract)
 main.add_command(mcp)
+main.add_command(ui)

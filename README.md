@@ -424,6 +424,20 @@ Launch the interactive Web Scraping shell
 ```bash
 scrapling shell
 ```
+Launch the built-in local web interface (no code needed)
+```bash
+scrapling ui --open-browser
+# then open http://127.0.0.1:7788/ if your browser doesn't auto-open
+```
+The built-in UI is designed for real-world use:
+- URL + CSS selector extraction
+- Output format selection (`md`/`html`/`txt`)
+- Request controls (headers, cookies, params, proxy, timeout, impersonation)
+- Request behavior toggles (follow redirects, SSL verification, stealthy headers)
+- AI-targeted extraction mode
+- Download extracted result in one click
+- Recent run history panel for debugging and monitoring
+
 Extract pages to a file directly without programming (Extracts the content inside the `body` tag by default). If the output file ends with `.txt`, then the text content of the target will be extracted. If it ends in `.md`, it will be a Markdown representation of the HTML content; if it ends in `.html`, it will be the HTML content itself.
 ```bash
 scrapling extract get 'https://example.com' content.md

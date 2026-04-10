@@ -1,11 +1,12 @@
 import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
 import pytest_httpbin
 
 from scrapling.parser import Selector
 from scrapling.cli import (
-    shell, mcp, get, post, put, delete, fetch, stealthy_fetch
+    shell, mcp, get, post, put, delete, fetch, stealthy_fetch, ui
 )
 
 
@@ -42,12 +43,19 @@ class TestCLI:
             assert result.exit_code == 0
             mock_instance.start.assert_called_once()
 
+    def test_ui_command(self, runner):
+        """Test ui command"""
+        with patch('scrapling.core.webui.run_web_ui') as mock_runner:
+            result = runner.invoke(ui, ['--host', '127.0.0.1', '--port', '7788', '--no-open-browser'])
+            assert result.exit_code == 0
+            mock_runner.assert_called_once_with(host='127.0.0.1', port=7788, open_browser=False)
+
     def test_mcp_command(self, runner):
         """Test MCP command"""
-        with patch('scrapling.core.ai.ScraplingMCPServer') as mock_server:
-            mock_instance = MagicMock()
-            mock_server.return_value = mock_instance
+        mock_instance = MagicMock()
+        fake_module = SimpleNamespace(ScraplingMCPServer=MagicMock(return_value=mock_instance))
 
+        with patch.dict('sys.modules', {'scrapling.core.ai': fake_module}):
             result = runner.invoke(mcp)
             assert result.exit_code == 0
             mock_instance.serve.assert_called_once()
