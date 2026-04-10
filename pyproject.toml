@@ -10,10 +10,10 @@ description = "Scrapling is an undetectable, powerful, flexible, high-performanc
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {file = "LICENSE"}
 authors = [
-    {name = "Karim Shoair", email = "karim.shoair@pm.me"}
+    {name = "Habib"}
 ]
 maintainers = [
-    {name = "Karim Shoair", email = "karim.shoair@pm.me"}
+    {name = "Habib"}
 ]
 keywords = [
     "web-scraping",

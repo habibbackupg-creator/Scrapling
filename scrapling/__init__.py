@@ -1,6 +1,6 @@
-__author__ = "Karim Shoair (karim.shoair@pm.me)"
+__author__ = "Habib"
 __version__ = "0.4.5"
-__copyright__ = "Copyright (c) 2024 Karim Shoair"
+__copyright__ = "Copyright (c) 2024 Habib"
 
 from typing import Any, TYPE_CHECKING
 
