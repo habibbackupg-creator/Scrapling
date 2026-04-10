@@ -550,6 +550,63 @@ _PAGE_TEMPLATE = """<!doctype html>
       }
     }
 
+    function downloadTextFile(filename, content, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    }
+
+    function exportCustomPresets() {
+      const presets = getCustomPresets();
+      const content = JSON.stringify(presets, null, 2);
+      downloadTextFile('scrapling-custom-presets.json', content, 'application/json');
+    }
+
+    async function importCustomPresetsFromFile(file) {
+      if (!file) {
+        return;
+      }
+
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Preset file must contain a JSON object.');
+      }
+
+      const current = getCustomPresets();
+      Object.entries(parsed).forEach(([key, preset]) => {
+        if (preset && typeof preset === 'object' && preset.title) {
+          current[key] = preset;
+        }
+      });
+
+      saveCustomPresets(current);
+      renderPresetCards();
+    }
+
+    async function importCustomPresets() {
+      const input = document.getElementById('import_custom_presets');
+      const file = input && input.files ? input.files[0] : null;
+      if (!file) {
+        return;
+      }
+
+      try {
+        await importCustomPresetsFromFile(file);
+        if (input) {
+          input.value = '';
+        }
+      } catch (error) {
+        alert(error instanceof Error ? error.message : 'Unable to import presets.');
+      }
+    }
+
     function matchesScope(preset, scope) {
       if (scope === 'all') {
         return true;
@@ -613,6 +670,8 @@ _PAGE_TEMPLATE = """<!doctype html>
 
     window.applyPreset = applyPreset;
     window.deleteCustomPreset = deleteCustomPreset;
+    window.exportCustomPresets = exportCustomPresets;
+    window.importCustomPresets = importCustomPresets;
 
     document.addEventListener('DOMContentLoaded', () => {
       restoreState();
@@ -621,6 +680,8 @@ _PAGE_TEMPLATE = """<!doctype html>
       const presetSearch = document.getElementById('preset_search');
       const presetScope = document.getElementById('preset_scope');
       const savePresetBtn = document.getElementById('save_custom_preset');
+      const exportPresetBtn = document.getElementById('export_custom_presets');
+      const importPresetBtn = document.getElementById('import_custom_presets_btn');
       const clearFormBtn = document.getElementById('clear_saved_form');
 
       if (presetSearch) {
@@ -631,6 +692,12 @@ _PAGE_TEMPLATE = """<!doctype html>
       }
       if (savePresetBtn) {
         savePresetBtn.addEventListener('click', saveCurrentAsPreset);
+      }
+      if (exportPresetBtn) {
+        exportPresetBtn.addEventListener('click', exportCustomPresets);
+      }
+      if (importPresetBtn) {
+        importPresetBtn.addEventListener('click', importCustomPresets);
       }
       if (clearFormBtn) {
         clearFormBtn.addEventListener('click', () => {
@@ -679,6 +746,8 @@ class _ExtractResult:
     output: str = ""
     message: str = ""
     download_id: str = ""
+    lead_score: int = 0
+    comparison_summary: str = ""
     emails: list[str] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
@@ -693,6 +762,7 @@ class _BatchRow:
     url: str
     status: Optional[int] = None
     ok: bool = False
+    lead_score: int = 0
     emails: list[str] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
@@ -723,6 +793,12 @@ class _HistoryEntry:
     status: Optional[int]
     ok: bool
     message: str
+    lead_score: int
+    email_count: int
+    phone_count: int
+    link_count: int
+    cta_count: int
+    tracker_count: int
 
 
 _HISTORY: deque[_HistoryEntry] = deque(maxlen=25)
@@ -1029,11 +1105,62 @@ def _extract_marketing_insights(raw_output: str, links: list[str]) -> tuple[list
     return cta_links, tracker_hits
 
 
+def _calculate_lead_score(result: _ExtractResult) -> int:
+  score = 0
+  score += min(len(result.emails) * 20, 40)
+  score += min(len(result.phones) * 12, 24)
+  score += min(sum(len(items) for items in result.social_links.values()) * 8, 24)
+  score += min(len(result.cta_links) * 10, 20)
+  score += min(len(result.tracker_hits) * 3, 9)
+  if result.status and 200 <= result.status < 400:
+    score += 10
+  return min(score, 100)
+
+
+def _lead_score_label(score: int) -> str:
+  if score >= 80:
+    return "Hot"
+  if score >= 55:
+    return "Warm"
+  if score >= 30:
+    return "Nurture"
+  return "Cold"
+
+
+def _build_run_comparison(result: _ExtractResult, state: _UIFormState) -> str:
+  previous_entry = next((entry for entry in _HISTORY if entry.url == state.url), None)
+  if previous_entry is None:
+    return ""
+
+  deltas = []
+
+  def _format_delta(label: str, value: int) -> str:
+    if value == 0:
+      return f"{label}: no change"
+    prefix = "+" if value > 0 else ""
+    return f"{label}: {prefix}{value}"
+
+  deltas.append(_format_delta("Emails", len(result.emails) - previous_entry.email_count))
+  deltas.append(_format_delta("Phones", len(result.phones) - previous_entry.phone_count))
+  deltas.append(_format_delta("CTA links", len(result.cta_links) - previous_entry.cta_count))
+  deltas.append(_format_delta("Trackers", len(result.tracker_hits) - previous_entry.tracker_count))
+
+  score_delta = result.lead_score - previous_entry.lead_score
+  score_prefix = "+" if score_delta > 0 else ""
+  return (
+    "Compared with the previous run for this URL: "
+    f"score {score_prefix}{score_delta}; "
+    + "; ".join(deltas)
+  )
+
+
 def _build_marketing_payload(result: _ExtractResult, state: _UIFormState) -> str:
     payload = {
         "url": state.url,
         "format": state.fmt,
         "http_status": result.status,
+    "lead_score": result.lead_score,
+    "comparison_summary": result.comparison_summary,
         "counts": {
             "emails": len(result.emails),
             "phones": len(result.phones),
@@ -1077,34 +1204,36 @@ def _build_batch_payload(result: _BatchResult) -> str:
         "success_count": result.success_count,
         "failed_count": result.failed_count,
         "rows": [
-        {
-            "url": row.url,
-            "ok": row.ok,
-            "status": row.status,
-            "emails": row.emails,
-            "phones": row.phones,
-            "links": row.links,
-            "cta_links": row.cta_links,
-            "tracker_hits": row.tracker_hits,
-            "social_links": row.social_links,
-            "error": row.error,
-        }
-        for row in result.rows
+            {
+                "url": row.url,
+                "ok": row.ok,
+                "status": row.status,
+                "lead_score": row.lead_score,
+                "emails": row.emails,
+                "phones": row.phones,
+                "links": row.links,
+                "cta_links": row.cta_links,
+                "tracker_hits": row.tracker_hits,
+                "social_links": row.social_links,
+                "error": row.error,
+            }
+            for row in result.rows
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _build_batch_csv(result: _BatchResult) -> str:
-    header = "url,ok,status,emails,phones,links,cta_links,tracker_hits,error"
+    header = "url,ok,status,lead_score,emails,phones,links,cta_links,tracker_hits,error"
     lines = [header]
     for row in result.rows:
-      lines.append(
+        lines.append(
             ",".join(
                 [
                     json.dumps(row.url)[1:-1],
                     "true" if row.ok else "false",
                     str(row.status if row.status is not None else ""),
+                    str(row.lead_score),
                     str(len(row.emails)),
                     str(len(row.phones)),
                     str(len(row.links)),
@@ -1113,7 +1242,7 @@ def _build_batch_csv(result: _BatchResult) -> str:
                     json.dumps(row.error)[1:-1],
                 ]
             )
-      )
+        )
     return "\n".join(lines)
 
 
@@ -1179,6 +1308,18 @@ def _extract_batch_from_form(form_data: bytes) -> tuple[_BatchResult, list[str]]
                 cta_links, tracker_hits = _extract_marketing_insights(output, links)
                 row.status = response.status
                 row.ok = True
+                row.lead_score = _calculate_lead_score(
+                  _ExtractResult(
+                    ok=True,
+                    status=response.status,
+                    emails=emails,
+                    phones=phones,
+                    links=links,
+                    social_links=social_links,
+                    cta_links=cta_links,
+                    tracker_hits=tracker_hits,
+                  )
+                )
                 row.emails = emails
                 row.phones = phones
                 row.links = links
@@ -1249,6 +1390,12 @@ def _record_history(result: _ExtractResult, state: _UIFormState) -> None:
         status=result.status,
         ok=result.ok,
         message=result.message,
+    lead_score=result.lead_score,
+    email_count=len(result.emails),
+    phone_count=len(result.phones),
+    link_count=len(result.links),
+    cta_count=len(result.cta_links),
+    tracker_count=len(result.tracker_hits),
     )
     with _STATE_LOCK:
         _HISTORY.appendleft(entry)
@@ -1261,77 +1408,37 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
     if result.ok:
         download_link = f'/download/{result.download_id}' if result.download_id else "#"
         insights_download_link = f'/download/{result.insights_download_id}' if result.insights_download_id else "#"
+        lead_score_label = _lead_score_label(result.lead_score)
+        comparison_block = f'<div class="meta">{html.escape(result.comparison_summary)}</div>' if result.comparison_summary else ""
 
-        email_items = (
-            "".join(
-                f'<li><a href="mailto:{html.escape(email)}">{html.escape(email)}</a></li>'
-                for email in result.emails
-            )
-            if result.emails
-            else '<li class="insight-note">No emails detected.</li>'
-        )
-
-        phone_items = (
-            "".join(f"<li>{html.escape(phone)}</li>" for phone in result.phones)
-            if result.phones
-            else '<li class="insight-note">No phone numbers detected.</li>'
-        )
-
-        if result.social_links:
-            social_rows = []
-            for platform, links in sorted(result.social_links.items(), key=lambda item: item[0]):
-                items = "".join(
-                    f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
-                    for link in links
-                )
-                social_rows.append(
-                    '<details>'
-                    f'<summary>{html.escape(platform)} ({len(links)})</summary>'
-                    f'<ul class="insight-list" style="margin-top:6px">{items}</ul>'
-                    '</details>'
-                )
-            social_block = "".join(social_rows)
-        else:
-            social_block = '<p class="insight-note">No social profile links detected.</p>'
-
-        link_items = (
-            "".join(
-                f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
-                for link in result.links[:40]
-            )
-            if result.links
-            else '<li class="insight-note">No links detected.</li>'
-        )
-
-        cta_items = (
-            "".join(
-                f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
-                for link in result.cta_links[:20]
-            )
-            if result.cta_links
-            else '<li class="insight-note">No CTA links detected.</li>'
-        )
-
-        tracker_items = (
-            "".join(f"<li>{html.escape(item)}</li>" for item in result.tracker_hits)
-            if result.tracker_hits
-            else '<li class="insight-note">No known tracker/pixel signatures detected.</li>'
-        )
-
+        email_items = "".join(
+            f'<li><a href="mailto:{html.escape(email)}">{html.escape(email)}</a></li>'
+            for email in result.emails
+        ) or '<li class="insight-note">No emails detected.</li>'
+        phone_items = "".join(f"<li>{html.escape(phone)}</li>" for phone in result.phones) or '<li class="insight-note">No phone numbers detected.</li>'
+        link_items = "".join(
+            f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
+            for link in result.links[:20]
+        ) or '<li class="insight-note">No links detected.</li>'
+        cta_items = "".join(
+            f'<li><a href="{html.escape(link)}" target="_blank" rel="noopener noreferrer">{html.escape(link)}</a></li>'
+            for link in result.cta_links[:20]
+        ) or '<li class="insight-note">No CTA links detected.</li>'
+        tracker_items = "".join(f"<li>{html.escape(item)}</li>" for item in result.tracker_hits) or '<li class="insight-note">No known tracker/pixel signatures detected.</li>'
+        social_summary = ", ".join(f"{platform}: {len(links)}" for platform, links in sorted(result.social_links.items())) or "No social profile links detected."
         stats_line = (
-            f'Emails: {len(result.emails)} | '
-            f'Phones: {len(result.phones)} | '
+            f'Emails: {len(result.emails)} | Phones: {len(result.phones)} | '
             f'Social links: {sum(len(v) for v in result.social_links.values())} | '
-            f'All links: {len(result.links)} | '
-            f'CTA links: {len(result.cta_links)} | '
-            f'Trackers: {len(result.tracker_hits)}'
+            f'All links: {len(result.links)} | CTA links: {len(result.cta_links)} | Trackers: {len(result.tracker_hits)}'
         )
 
         return (
             '<section class="card">'
             '<div class="status-ok">Extraction completed</div>'
+            f'<div class="meta"><strong>Lead score:</strong> {result.lead_score}/100 ({html.escape(lead_score_label)})</div>'
             f'<div class="meta">HTTP status: {result.status}</div>'
             f'<div class="meta">{html.escape(stats_line)}</div>'
+            f'{comparison_block}'
             '<div class="actions" style="margin-top:10px">'
             f'<a class="btn secondary" href="{download_link}">Download output</a>'
             f'<a class="btn ghost" href="{insights_download_link}">Download marketing JSON</a>'
@@ -1347,10 +1454,10 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
             '</div>'
             '<div class="insight-card">'
             '<h3 class="insight-title">Detected Social Links</h3>'
-            f'{social_block}'
+            f'<p class="insight-note">{html.escape(social_summary)}</p>'
             '</div>'
             '<div class="insight-card">'
-            '<h3 class="insight-title">Detected Links (Top 40)</h3>'
+            '<h3 class="insight-title">Detected Links</h3>'
             f'<ul class="insight-list">{link_items}</ul>'
             '</div>'
             '<div class="insight-card">'
@@ -1396,6 +1503,11 @@ def _render_preset_block() -> str:
     '<div class="preset-save-row">'
     '<input id="custom_preset_name" type="text" placeholder="Save current form as preset name..." />'
     '<button id="save_custom_preset" class="btn ghost" type="button">Save Current as Preset</button>'
+    '<button id="export_custom_presets" class="btn secondary" type="button">Export Custom Presets</button>'
+    '</div>'
+    '<div class="preset-save-row">'
+    '<input id="import_custom_presets" type="file" accept="application/json" />'
+    '<button id="import_custom_presets_btn" class="btn ghost" type="button">Import Custom Presets</button>'
     '<button id="clear_saved_form" class="btn secondary" type="button">Clear Remembered Form</button>'
     '</div>'
     '<div id="preset_cards" class="preset-grid"></div>'
@@ -1404,89 +1516,90 @@ def _render_preset_block() -> str:
 
 
 def _render_dashboard_block(state: Optional[_UIFormState] = None) -> str:
-  state = state or _UIFormState()
-  bulk_urls = html.escape(state.url)
-  return (
-    '<section class="card">'
-    '<div class="section-title" style="margin-top:0">Marketing Dashboard</div>'
-    '<p>Paste multiple URLs, reuse the same request settings, and inspect contact, CTA, and tracker signals in one pass.</p>'
-    '<form method="post" action="/batch">'
-    '<label for="bulk_urls">Bulk URLs (one per line)</label>'
-    f'<textarea id="bulk_urls" name="bulk_urls" placeholder="https://example.com\nhttps://example.org">{bulk_urls}</textarea>'
-    '<div class="grid-2">'
-    '<div>'
-    '<label for="bulk_css_selector">Bulk CSS Selector (optional)</label>'
-    f'<input id="bulk_css_selector" name="bulk_css_selector" type="text" value="{html.escape(state.css_selector)}" placeholder="a[href], form, script" />'
-    '</div>'
-    '<div>'
-    '<label for="bulk_fmt">Bulk Output Format</label>'
-    f'<select id="bulk_fmt" name="bulk_fmt">{_render_format_options(state.fmt)}</select>'
-    '</div>'
-    '</div>'
-    '<div class="grid-3">'
-    '<div>'
-    '<label for="bulk_impersonate">Impersonate</label>'
-    f'<input id="bulk_impersonate" name="bulk_impersonate" type="text" value="{html.escape(state.impersonate)}" />'
-    '</div>'
-    '<div>'
-    '<label for="bulk_timeout">Timeout (seconds)</label>'
-    f'<input id="bulk_timeout" name="bulk_timeout" type="number" min="1" max="300" value="{state.timeout}" />'
-    '</div>'
-    '<div>'
-    '<label for="bulk_proxy">Proxy (optional)</label>'
-    f'<input id="bulk_proxy" name="bulk_proxy" type="text" value="{html.escape(state.proxy)}" placeholder="http://user:pass@host:port" />'
-    '</div>'
-    '</div>'
-    '<div class="actions">'
-    '<button class="btn" type="submit">Run Dashboard Audit</button>'
-    '<a class="btn secondary" href="/">Reset</a>'
-    '</div>'
-    '</form>'
-    '</section>'
-  )
+    state = state or _UIFormState()
+    bulk_urls = html.escape(state.url)
+    return (
+        '<section class="card">'
+        '<div class="section-title" style="margin-top:0">Marketing Dashboard</div>'
+        '<p>Paste multiple URLs, reuse the same request settings, and inspect contact, CTA, and tracker signals in one pass.</p>'
+        '<form method="post" action="/batch">'
+        '<label for="bulk_urls">Bulk URLs (one per line)</label>'
+        f'<textarea id="bulk_urls" name="bulk_urls" placeholder="https://example.com\nhttps://example.org">{bulk_urls}</textarea>'
+        '<div class="grid-2">'
+        '<div>'
+        '<label for="bulk_css_selector">Bulk CSS Selector (optional)</label>'
+        f'<input id="bulk_css_selector" name="bulk_css_selector" type="text" value="{html.escape(state.css_selector)}" placeholder="a[href], form, script" />'
+        '</div>'
+        '<div>'
+        '<label for="bulk_fmt">Bulk Output Format</label>'
+        f'<select id="bulk_fmt" name="bulk_fmt">{_render_format_options(state.fmt)}</select>'
+        '</div>'
+        '</div>'
+        '<div class="grid-3">'
+        '<div>'
+        '<label for="bulk_impersonate">Impersonate</label>'
+        f'<input id="bulk_impersonate" name="bulk_impersonate" type="text" value="{html.escape(state.impersonate)}" />'
+        '</div>'
+        '<div>'
+        '<label for="bulk_timeout">Timeout (seconds)</label>'
+        f'<input id="bulk_timeout" name="bulk_timeout" type="number" min="1" max="300" value="{state.timeout}" />'
+        '</div>'
+        '<div>'
+        '<label for="bulk_proxy">Proxy (optional)</label>'
+        f'<input id="bulk_proxy" name="bulk_proxy" type="text" value="{html.escape(state.proxy)}" placeholder="http://user:pass@host:port" />'
+        '</div>'
+        '</div>'
+        '<div class="actions">'
+        '<button class="btn" type="submit">Run Dashboard Audit</button>'
+        '<a class="btn secondary" href="/">Reset</a>'
+        '</div>'
+        '</form>'
+        '</section>'
+    )
 
 
 def _render_batch_result_block(result: Optional[_BatchResult]) -> str:
-  if result is None:
-    return ""
+    if result is None:
+        return ""
 
-  if not result.ok:
+    if not result.ok:
+        return (
+            '<section class="card">'
+            '<div class="status-bad">Bulk audit failed</div>'
+            f'<pre>{html.escape(result.message)}</pre>'
+            '</section>'
+        )
+
+    rows = []
+    for row in result.rows:
+        rows.append(
+            '<tr>'
+            f'<td class="mono">{html.escape(row.url)}</td>'
+            f'<td>{"OK" if row.ok else "FAILED"}</td>'
+            f'<td>{row.status if row.status is not None else "-"}</td>'
+            f'<td>{row.lead_score}</td>'
+            f'<td>{len(row.emails)}</td>'
+            f'<td>{len(row.phones)}</td>'
+            f'<td>{len(row.cta_links)}</td>'
+            f'<td>{len(row.tracker_hits)}</td>'
+            f'<td class="mono">{html.escape(row.error[:160]) if row.error else "-"}</td>'
+            '</tr>'
+        )
+
     return (
-      '<section class="card">'
-      '<div class="status-bad">Bulk audit failed</div>'
-      f'<pre>{html.escape(result.message)}</pre>'
-      '</section>'
+        '<section class="card">'
+        '<div class="status-ok">Bulk audit completed</div>'
+        f'<div class="meta">Processed: {result.total_urls} | Success: {result.success_count} | Failed: {result.failed_count}</div>'
+        '<div class="actions" style="margin-top:10px">'
+        f'<a class="btn secondary" href="{f"/download/{result.download_id}" if result.download_id else "#"}">Download JSON</a>'
+        f'<a class="btn ghost" href="{f"/download/{result.csv_download_id}" if result.csv_download_id else "#"}">Download CSV</a>'
+        '</div>'
+        '<table style="margin-top:12px">'
+        '<thead><tr><th>URL</th><th>Status</th><th>HTTP</th><th>Score</th><th>Emails</th><th>Phones</th><th>CTA</th><th>Trackers</th><th>Notes</th></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody>"
+        '</table>'
+        '</section>'
     )
-
-  rows = []
-  for row in result.rows:
-    rows.append(
-      '<tr>'
-      f'<td class="mono">{html.escape(row.url)}</td>'
-      f'<td>{"OK" if row.ok else "FAILED"}</td>'
-      f'<td>{row.status if row.status is not None else "-"}</td>'
-      f'<td>{len(row.emails)}</td>'
-      f'<td>{len(row.phones)}</td>'
-      f'<td>{len(row.cta_links)}</td>'
-      f'<td>{len(row.tracker_hits)}</td>'
-      f'<td class="mono">{html.escape(row.error[:160]) if row.error else "-"}</td>'
-      '</tr>'
-    )
-
-  return (
-    '<section class="card">'
-    '<div class="status-ok">Bulk audit completed</div>'
-    f'<div class="meta">Processed: {result.total_urls} | Success: {result.success_count} | Failed: {result.failed_count}</div>'
-    '<div class="actions" style="margin-top:10px">'
-    f'<a class="btn secondary" href="{f"/download/{result.download_id}" if result.download_id else "#"}">Download JSON</a>'
-    f'<a class="btn ghost" href="{f"/download/{result.csv_download_id}" if result.csv_download_id else "#"}">Download CSV</a>'
-    '</div>'
-    '<table style="margin-top:12px">'
-    '<thead><tr><th>URL</th><th>Status</th><th>HTTP</th><th>Emails</th><th>Phones</th><th>CTA</th><th>Trackers</th><th>Notes</th></tr></thead>'
-    f"<tbody>{''.join(rows)}</tbody>"
-    '</table>'
-    '</section>'
-  )
 
 
 def _render_history_block() -> str:
@@ -1509,6 +1622,7 @@ def _render_history_block() -> str:
             f"<td>{html.escape(entry.fmt.upper())}</td>"
             f"<td class=\"mono\">{selector}</td>"
             f"<td>{status_text}</td>"
+            f"<td>{entry.lead_score}</td>"
             f"<td>{result_text}</td>"
             f"<td class=\"mono\">{details}</td>"
             "</tr>"
@@ -1518,7 +1632,7 @@ def _render_history_block() -> str:
         '<section class="card">'
         '<div class="section-title" style="margin-top:0">Recent Runs</div>'
         '<table>'
-        '<thead><tr><th>Time</th><th>URL</th><th>Fmt</th><th>Selector</th><th>Status</th><th>Result</th><th>Details</th></tr></thead>'
+        '<thead><tr><th>Time</th><th>URL</th><th>Fmt</th><th>Selector</th><th>Status</th><th>Score</th><th>Result</th><th>Details</th></tr></thead>'
         f"<tbody>{''.join(rows)}</tbody>"
         '</table>'
         '</section>'
@@ -1636,6 +1750,8 @@ def _extract_from_form(form_data: bytes) -> tuple[_ExtractResult, _UIFormState]:
             cta_links=cta_links,
             tracker_hits=tracker_hits,
         )
+        result.lead_score = _calculate_lead_score(result)
+        result.comparison_summary = _build_run_comparison(result, state)
         result.insights_download_id = _cache_download(_build_marketing_payload(result, state), "json")
         _record_history(result, state)
         return result, state
