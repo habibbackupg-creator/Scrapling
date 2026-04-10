@@ -51,6 +51,10 @@ case "$MODE" in
       # Install only what web UI needs when running outside App Platform build step.
       python -m pip install -e ".[fetchers]"
     fi
+    # In container builds that use uv, run from uv-managed env so compiled deps (e.g. lxml) are available.
+    if command -v uv >/dev/null 2>&1; then
+      exec uv run python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
+    fi
     exec python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
     ;;
   *)
