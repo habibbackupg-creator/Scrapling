@@ -297,7 +297,39 @@ _PAGE_TEMPLATE = """<!doctype html>
       font-family: \"IBM Plex Mono\", \"Cascadia Mono\", monospace;
       word-break: break-word;
     }
+    .wizard {
+      margin: 10px 0 14px;
+      padding: 12px;
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      background: linear-gradient(180deg, #fffdf7, #f8f2e7);
+    }
+    .wizard-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .wizard-step {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .wizard-step span {
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+    .wizard-summary {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
     @media (max-width: 900px) {
+      .wizard-grid { grid-template-columns: 1fr; }
+      .wizard-grid .btn { width: 100%; }
       .grid-3 { grid-template-columns: 1fr; }
       .preset-grid { grid-template-columns: 1fr; }
         .preset-toolbar { grid-template-columns: 1fr; }
@@ -314,6 +346,28 @@ _PAGE_TEMPLATE = """<!doctype html>
     <section class=\"card\">
       <h1>Scrapling Built-in Interface</h1>
       <p>Fetch a page and extract full content or selected nodes without writing a script.</p>
+
+      <div class=\"wizard\">
+        <div class=\"section-title\" style=\"margin-top:0\">Guided Mode</div>
+        <div class=\"wizard-grid\">
+          <label class=\"wizard-step\" for=\"wizard_url\">
+            <span>Step 1: URL</span>
+            <input id=\"wizard_url\" type=\"url\" placeholder=\"https://example.com\" />
+          </label>
+          <label class=\"wizard-step\" for=\"wizard_goal\">
+            <span>Step 2: Goal</span>
+            <select id=\"wizard_goal\">
+              <option value=\"contact\">Contact</option>
+              <option value=\"lead\">Lead</option>
+              <option value=\"competitor\">Competitor</option>
+              <option value=\"marketing\">Marketing</option>
+            </select>
+          </label>
+          <button id=\"wizard_apply_run\" class=\"btn\" type=\"button\">Step 3: Smart Defaults + Run</button>
+        </div>
+        <div id=\"wizard_summary\" class=\"wizard-summary\"></div>
+      </div>
+
       <form method=\"post\" action=\"/extract\">
         <label for=\"url\">URL</label>
         <input id=\"url\" name=\"url\" type=\"url\" required value=\"$url\" placeholder=\"https://example.com\" />
@@ -384,6 +438,18 @@ _PAGE_TEMPLATE = """<!doctype html>
     const PRESETS = $presets_json;
     const STORAGE_KEY = 'scrapling.ui.savedForm';
     const CUSTOM_PRESETS_KEY = 'scrapling.ui.customPresets';
+    const GOAL_PRESET_MAP = {
+      contact: 'company_contact',
+      lead: 'saas_lead_hunt',
+      competitor: 'saas_competitor',
+      marketing: 'marketing_stack_hunt'
+    };
+    const GOAL_SUMMARY_MAP = {
+      contact: 'Contact goal uses email/contact-focused selectors and TXT output for clean lead extraction.',
+      lead: 'Lead goal uses conversion and sales-oriented selectors with scoring-friendly defaults.',
+      competitor: 'Competitor goal captures headline, value props, pricing, and CTA blocks from landing pages.',
+      marketing: 'Marketing goal prioritizes script and link signals to detect tracking and stack fingerprints.'
+    };
 
     function readField(id) {
       const element = document.getElementById(id);
@@ -690,6 +756,49 @@ _PAGE_TEMPLATE = """<!doctype html>
         .join('');
     }
 
+    function updateWizardSummary() {
+      const goal = readField('wizard_goal') || 'contact';
+      const summary = document.getElementById('wizard_summary');
+      if (!summary) {
+        return;
+      }
+
+      const presetKey = GOAL_PRESET_MAP[goal];
+      const preset = getAllPresets()[presetKey];
+      const goalText = GOAL_SUMMARY_MAP[goal] || 'Goal selected.';
+      const presetTitle = preset && preset.title ? preset.title : 'No preset';
+      summary.textContent = `Smart defaults: ${presetTitle}. ${goalText}`;
+    }
+
+    function runGuidedFlow() {
+      const wizardUrl = (readField('wizard_url') || '').trim();
+      const goal = readField('wizard_goal') || 'contact';
+      const presetKey = GOAL_PRESET_MAP[goal];
+      const form = document.querySelector('form[action="/extract"]');
+
+      if (!wizardUrl || !form) {
+        return;
+      }
+
+      try {
+        const parsed = new URL(wizardUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          alert('Only http/https URLs are supported.');
+          return;
+        }
+      } catch (error) {
+        alert('Please enter a valid URL.');
+        return;
+      }
+
+      if (presetKey) {
+        applyPreset(presetKey);
+      }
+      writeField('url', wizardUrl);
+      saveState();
+      form.submit();
+    }
+
     window.applyPreset = applyPreset;
     window.deleteCustomPreset = deleteCustomPreset;
     window.exportCustomPresets = exportCustomPresets;
@@ -705,6 +814,14 @@ _PAGE_TEMPLATE = """<!doctype html>
       const exportPresetBtn = document.getElementById('export_custom_presets');
       const importPresetBtn = document.getElementById('import_custom_presets_btn');
       const clearFormBtn = document.getElementById('clear_saved_form');
+      const wizardUrl = document.getElementById('wizard_url');
+      const wizardGoal = document.getElementById('wizard_goal');
+      const wizardApplyRunBtn = document.getElementById('wizard_apply_run');
+
+      if (wizardUrl) {
+        wizardUrl.value = readField('url') || '';
+      }
+      updateWizardSummary();
 
       if (presetSearch) {
         presetSearch.addEventListener('input', renderPresetCards);
@@ -727,11 +844,23 @@ _PAGE_TEMPLATE = """<!doctype html>
           window.location.reload();
         });
       }
+      if (wizardGoal) {
+        wizardGoal.addEventListener('change', updateWizardSummary);
+      }
+      if (wizardApplyRunBtn) {
+        wizardApplyRunBtn.addEventListener('click', runGuidedFlow);
+      }
 
       document.querySelectorAll('input, textarea, select').forEach((element) => {
         element.addEventListener('input', saveState);
         element.addEventListener('change', saveState);
       });
+      if (wizardUrl) {
+        wizardUrl.addEventListener('input', () => {
+          writeField('url', wizardUrl.value);
+          saveState();
+        });
+      }
 
       const form = document.querySelector('form[action="/extract"]');
       if (form) {
