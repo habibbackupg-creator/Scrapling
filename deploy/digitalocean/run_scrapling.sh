@@ -41,10 +41,12 @@ case "$MODE" in
     xvfb-run -a pytest --cov=scrapling --cov-report=xml -m "not asyncio" -k "not (DynamicFetcher or StealthyFetcher)" -n auto --cov-append
     ;;
   ui)
-    python -m pip install --upgrade pip
-    # Install only core scrapling - UI doesn't need Playwright, IPython, MCP, etc.
-    python -m pip install -e ".[fetchers]"
-    exec python -m scrapling.cli ui --host 0.0.0.0 --port "${PORT:-8000}" --no-open-browser
+    if [[ "${SCRAPLING_SKIP_INSTALL:-0}" != "1" ]]; then
+      python -m pip install --upgrade pip
+      # Install only what web UI needs when running outside App Platform build step.
+      python -m pip install -e ".[fetchers]"
+    fi
+    exec python -c "from scrapling.core.webui import run_web_ui; run_web_ui(host='0.0.0.0', port=int('${PORT:-8000}'), open_browser=False)"
     ;;
   *)
     echo "Unknown mode: $MODE" >&2
