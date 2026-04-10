@@ -209,6 +209,28 @@ _PAGE_TEMPLATE = """<!doctype html>
       overflow: auto;
       font-family: \"IBM Plex Mono\", \"Cascadia Mono\", monospace;
     }
+    details.full-output {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+    details.full-output summary {
+      cursor: pointer;
+      padding: 10px 12px;
+      color: var(--accent-2);
+      font-weight: 700;
+      background: #f8f3e8;
+      list-style: none;
+    }
+    details.full-output summary::-webkit-details-marker {
+      display: none;
+    }
+    details.full-output .details-body {
+      border-top: 1px solid var(--line);
+      padding: 12px;
+    }
     .meta {
       margin-top: 8px;
       color: var(--muted);
@@ -1505,6 +1527,7 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
         insights_download_link = f'/download/{result.insights_download_id}' if result.insights_download_id else "#"
         lead_score_label = _lead_score_label(result.lead_score)
         comparison_block = f'<div class="meta">{html.escape(result.comparison_summary)}</div>' if result.comparison_summary else ""
+      full_output = html.escape(result.output)
 
         email_items = "".join(
             f'<li><a href="mailto:{html.escape(email)}">{html.escape(email)}</a></li>'
@@ -1566,6 +1589,13 @@ def _render_result_block(result: Optional[_ExtractResult], escaped_preview: str)
             '</div>'
             '<label style="margin-top:10px">Preview</label>'
             f'<pre>{escaped_preview}</pre>'
+            '<details class="full-output">'
+            '<summary>Show full output</summary>'
+            '<div class="details-body">'
+            '<div class="meta" style="margin-top:0">Full extracted result, unchanged from the backend response.</div>'
+            f'<pre>{full_output}</pre>'
+            '</div>'
+            '</details>'
             '</section>'
         )
 
