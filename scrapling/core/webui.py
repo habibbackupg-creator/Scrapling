@@ -514,6 +514,20 @@ _PAGE_TEMPLATE = """<!doctype html>
         </div>
       </div>
 
+      <div class=\"help-card\" style=\"margin-bottom:12px\">
+        <h3>Website Marketing Agent</h3>
+        <ul>
+          <li>Single-site marketing intelligence: trackers, CTA, contact, and lead score.</li>
+          <li>Bulk competitor audit: compare multiple URLs with score-based filtering.</li>
+          <li>Action shortcuts below apply best marketing presets automatically.</li>
+        </ul>
+        <div class=\"actions\" style=\"margin-top:10px\">
+          <button id=\"marketing_agent_quick_single\" class=\"btn\" type=\"button\">Run Smart Marketing Audit</button>
+          <button id=\"marketing_agent_quick_bulk\" class=\"btn ghost\" type=\"button\">Run Bulk Competitor Audit</button>
+          <button id=\"marketing_agent_open_dashboard\" class=\"btn secondary\" type=\"button\">Open Marketing Dashboard</button>
+        </div>
+      </div>
+
       <form method=\"post\" action=\"/extract\">
         <label for=\"url\">URL</label>
         <input id=\"url\" name=\"url\" type=\"url\" required value=\"$url\" placeholder=\"https://example.com\" />
@@ -1102,6 +1116,64 @@ _PAGE_TEMPLATE = """<!doctype html>
       form.submit();
     }
 
+    function runMarketingAgentSingle() {
+      const candidate = (readField('wizard_url') || readField('url') || '').trim();
+      const form = document.querySelector('form[action="/extract"]');
+      if (!form) {
+        return;
+      }
+      if (!candidate) {
+        alert('Add a target URL first.');
+        return;
+      }
+      try {
+        const parsed = new URL(candidate);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          alert('Only http/https URLs are supported.');
+          return;
+        }
+      } catch (error) {
+        alert('Please enter a valid URL.');
+        return;
+      }
+
+      applyPreset('marketing_stack_hunt');
+      writeField('wizard_goal', 'marketing');
+      writeField('url', candidate);
+      writeField('wizard_url', candidate);
+      updateWizardSummary();
+      saveState();
+      form.submit();
+    }
+
+    function runMarketingAgentBulk() {
+      const candidate = (readField('wizard_url') || readField('url') || '').trim();
+      const bulkForm = document.querySelector('form[action="/batch"]');
+      if (!bulkForm) {
+        return;
+      }
+      if (!candidate) {
+        alert('Add a target URL first to seed bulk audit.');
+        return;
+      }
+
+      const bulkPreset = PRESETS.bulk_competitor_hunt || PRESETS.marketing_stack_hunt;
+      writeField('bulk_urls', candidate);
+      writeField('bulk_css_selector', bulkPreset.css_selector || 'a[href], script');
+      writeField('bulk_fmt', bulkPreset.fmt || 'txt');
+      writeField('bulk_impersonate', bulkPreset.impersonate || 'chrome');
+      writeField('bulk_timeout', bulkPreset.timeout || 30);
+      openMarketingDashboard();
+      bulkForm.submit();
+    }
+
+    function openMarketingDashboard() {
+      const target = document.getElementById('marketing_dashboard');
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
     window.applyPreset = applyPreset;
     window.deleteCustomPreset = deleteCustomPreset;
     window.exportCustomPresets = exportCustomPresets;
@@ -1128,6 +1200,9 @@ _PAGE_TEMPLATE = """<!doctype html>
       const batchFilterStatus = document.getElementById('batch_filter_status');
       const batchFilterEmail = document.getElementById('batch_filter_email');
       const batchCsvBtn = document.getElementById('download_custom_csv');
+      const marketingSingleBtn = document.getElementById('marketing_agent_quick_single');
+      const marketingBulkBtn = document.getElementById('marketing_agent_quick_bulk');
+      const marketingDashboardBtn = document.getElementById('marketing_agent_open_dashboard');
 
       if (wizardUrl) {
         wizardUrl.value = readField('url') || '';
@@ -1180,6 +1255,15 @@ _PAGE_TEMPLATE = """<!doctype html>
       }
       if (batchCsvBtn) {
         batchCsvBtn.addEventListener('click', downloadCustomCsv);
+      }
+      if (marketingSingleBtn) {
+        marketingSingleBtn.addEventListener('click', runMarketingAgentSingle);
+      }
+      if (marketingBulkBtn) {
+        marketingBulkBtn.addEventListener('click', runMarketingAgentBulk);
+      }
+      if (marketingDashboardBtn) {
+        marketingDashboardBtn.addEventListener('click', openMarketingDashboard);
       }
       document.querySelectorAll('.csv-col-toggle').forEach((node) => {
         node.addEventListener('change', persistCsvColumns);
@@ -2197,7 +2281,7 @@ def _render_dashboard_block(state: Optional[_UIFormState] = None) -> str:
     state = state or _UIFormState()
     bulk_urls = html.escape(state.url)
     return (
-        '<section class="card">'
+      '<section class="card" id="marketing_dashboard">'
         '<div class="section-title" style="margin-top:0">Marketing Dashboard</div>'
         '<p>Paste multiple URLs, reuse the same request settings, and inspect contact, CTA, and tracker signals in one pass.</p>'
         '<form method="post" action="/batch">'
